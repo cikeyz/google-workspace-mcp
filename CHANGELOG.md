@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.3.0 (2026-09-06) — First-party parity + MCP SDK 2.x
+
+Non-breaking: 17 new tools (54 to 71) + 4 prompts, no signature removals.
+Existing callers keep working; `google_chat_send` gains an optional
+`thread_name`, calendar reads/writes gain an optional `calendar_id`,
+`google_calendar_patch` gains optional `attendees`/`visibility`,
+`google_chat_messages` gains optional `filter_`/`order_by`.
+
+- SDK: `mcp` 1.29.1 to 2.1.1 (`FastMCP` to `MCPServer`; speaks both protocol
+  eras, 2025-06-18 and 2026-07-28, via `server/discover`). Sync tools now run
+  on worker threads; stdio serves one request at a time so the in-memory
+  staged-op store is unaffected. `RuntimeError` still surfaces as
+  model-visible tool errors (verified).
+- Gmail: labels list, staged label add/remove, thread-level search.
+- Drive: recency listing, inline text reads (Docs/Slides text, Sheets CSV),
+  staged inline file creation.
+- Sheets: staged row/column insertion. Formulas stay on `google_sheets_update`
+  with USER_ENTERED + allow_formulas (Google does not guard injection; we do).
+- Calendar: calendar discovery, free-text event search, staged RSVP, free-slot
+  suggestions over freebusy.
+- Chat: conversation search (list+filter; `spaces.search` 400s for consumer
+  accounts), staged read/unread, thread-reply fix (`messageReplyOption` plus
+  `thread_name` for human-created threads; old `thread_key` silently started
+  new threads).
+- People: own profile (new `userinfo.profile` scope), server-side contact
+  search. Directory search omitted (Workspace-only, 403s on consumer accounts).
+- Universal: `google_universal_search` fans one query across Drive/Gmail/
+  Calendar/Contacts with per-source isolation (Chat opt-in, capped).
+- Prompts: triage_inbox, prep_meeting_brief, summarize_thread, find_anything
+  (instruction templates only; they call the tools above, fetch nothing).
+- Deferred: generic Docs/Slides batchUpdate writers, MCP Tasks extension
+  (Python SDK has no runtime yet; staged writes already work on every client),
+  Resources primitive (tools cover all reads).
+- New scopes (re-auth via setup.py --auth-url): `userinfo.profile`,
+  `chat.users.readstate`. No scopes narrowed: full Drive/Calendar stay because
+  trash/share/permissions/patch are the product.
+- Rollback: pin the v2.2 tag and restart the host.
+
 ## v2.2.0 (2026-09-06) — Python 3.14 baseline
 
 Non-breaking. Documented and CI-tested baseline moves from 3.11 to 3.14

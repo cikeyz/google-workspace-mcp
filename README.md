@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.2.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.3.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -57,25 +57,29 @@ guide.
 
 Eleven Google Workspace services behind one server:
 
-- Gmail search, reads, thread summaries, attachment downloads, staged sends
-- Drive search, metadata, downloads, uploads, folders, sharing audit, copy,
-  move, trash
+- Gmail search, reads, thread summaries, labels, attachment downloads, staged sends
+- Drive search, metadata, inline text reads, recency, downloads, uploads, creates,
+  folders, sharing audit, copy, move, trash
 - Docs reads (all tabs), creates, appends
-- Sheets metadata, reads, updates, appends, creates, conditional-format reads
+- Sheets metadata, reads, updates, appends, creates, dimension inserts,
+  conditional-format reads
 - Slides reads and creates
 - Forms definitions, responses, listings
-- Calendar events, patches, deletes, free/busy
-- Contacts lists, search, single reads
+- Calendar lists, events, calendars, search, RSVP, time suggestions, patches,
+  deletes, free/busy
+- Contacts lists, server-side search, single reads, own profile
 - Tasks lists, reads, creates, patches, deletes
-- Chat spaces, messages, members, staged sends
+- Chat spaces, search, messages, members, read-state, staged sends
 - Meet spaces, reads, staged creates
+- Universal cross-product search, 4 guided prompts (inbox triage, meeting brief,
+  thread summary, find-anything)
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  Client[MCP client] --> Stdio[FastMCP stdio]
-  Stdio --> Tools[54 Workspace tools]
+  Client[MCP client] --> Stdio[MCP stdio]
+  Stdio --> Tools[71 Workspace tools + 4 prompts]
   Tools --> Stage[Staged-write gate]
   Stage --> Google[Google APIs]
   Tools --> State[(State home)]
@@ -151,28 +155,36 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 
 | Tool family | Purpose | Key inputs |
 |---|---|---|
-| `google_gmail_search`, `google_gmail_get`, `google_gmail_thread_get` | Search, read, thread summaries | `query`, `max_results`, `page_token`, `full`, `max_body_chars` |
+| `google_gmail_search`, `google_gmail_get`, `google_gmail_thread_get`, `google_gmail_search_threads` | Search, read, thread summaries | `query`, `max_results`, `page_token`, `full`, `max_body_chars` |
+| `google_gmail_labels_list`, `google_gmail_modify_labels` (staged) | Labels | `message_id`, `add_label_ids`, `remove_label_ids` |
 | `google_gmail_attachment_download` | Save attachments locally | `message_id`, `attachment_id` |
 | `google_gmail_send` (staged) | Send mail | `to`, `subject`, `body`, `cc`, `bcc` |
-| `google_drive_search`, `google_drive_get` | Find and describe files | `query`, `max_results`, `page_token`, `full` |
-| `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path` |
+| `google_drive_search`, `google_drive_get`, `google_drive_recent` | Find and describe files | `query`, `max_results`, `page_token`, `full`, `order` |
+| `google_drive_read_content` | Inline text reads (Docs/Slides text, Sheets CSV) | `file_id`, `max_chars`, `start_char` |
+| `google_drive_create_file` (staged), `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path`, `name`, `text_content` |
 | `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id` |
 | `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role` |
 | `google_drive_trash` (staged) | Recoverable delete | `file_id` |
 | `google_docs_read`, `google_docs_create`, `google_docs_append` (staged) | Read and write docs | `document_id`, `title`, `text` |
 | `google_sheets_metadata`, `google_sheets_read` | Inspect and read sheets | `spreadsheet_id`, `range_`, render options |
 | `google_sheets_update`, `google_sheets_append`, `google_sheets_create` (staged) | Write cells | `spreadsheet_id`, `range_`, `values` |
+| `google_sheets_insert_dimension` (staged) | Insert rows/columns | `spreadsheet_id`, `sheet_id`, `dimension`, `start_index`, `end_index` |
 | `google_sheets_conditional_formats` | Read format rules | `spreadsheet_id` |
 | `google_slides_get`, `google_slides_create` (staged) | Read and create decks | `presentation_id`, `title` |
 | `google_forms_list`, `google_forms_get`, `google_forms_responses` | Forms and answers | `form_id`, `page_token`, `filter_` |
-| `google_calendar_list`, `google_calendar_get` | Events | `start`, `end`, `page_token`, `q` |
-| `google_calendar_create`, `google_calendar_patch`, `google_calendar_delete` (staged) | Manage events | `summary`, `start`, `end`, `event_id` |
+| `google_calendar_list`, `google_calendar_get`, `google_calendar_search_events` | Events | `start`, `end`, `page_token`, `q`, `calendar_id` |
+| `google_calendar_list_calendars` | Discover calendars | `max_results`, `page_token` |
+| `google_calendar_suggest_time` | Free-slot suggestions | `time_min`, `time_max`, `duration_minutes` |
+| `google_calendar_create`, `google_calendar_patch`, `google_calendar_delete`, `google_calendar_respond` (staged) | Manage events + RSVP | `summary`, `start`, `end`, `event_id`, `response` |
 | `google_calendar_freebusy` | Availability windows | `time_min`, `time_max` |
-| `google_people_contacts`, `google_people_search`, `google_people_get` | Contacts | `max_results`, `page_token`, `query`, `full` |
+| `google_people_contacts`, `google_people_search`, `google_people_search_contacts`, `google_people_get`, `google_people_profile` | Contacts + profile | `max_results`, `page_token`, `query`, `full` |
 | `google_tasks_lists`, `google_tasks_list`, `google_tasks_get` | Read tasks | `tasklist_id`, `page_token`, filters |
 | `google_tasks_create`, `google_tasks_update`, `google_tasks_delete` (staged) | Manage tasks | `title`, `status`, `due` |
-| `google_chat_spaces`, `google_chat_messages`, `google_chat_members` | Rooms and history | `space_name`, `page_token` |
-| `google_chat_send` (staged) | Post messages | `space_name`, `text`, `thread_key` |
+| `google_chat_spaces`, `google_chat_search_conversations`, `google_chat_messages`, `google_chat_members` | Rooms and history | `space_name`, `page_token`, `filter_`, `query` |
+| `google_chat_mark_read`, `google_chat_mark_unread` (staged) | Read-state | `space_name` |
+| `google_chat_send` (staged) | Post messages | `space_name`, `text`, `thread_key`, `thread_name` |
+| `google_universal_search` | Cross-product fan-out | `query`, `sources`, `max_per_source` |
+| `triage_inbox`, `prep_meeting_brief`, `summarize_thread`, `find_anything` (prompts) | Guided workflows | per-prompt args |
 | `google_meet_create_space` (staged), `google_meet_get_space` | Meetings | `config`, `space_name` |
 | `google_auth_status` | Auth health | none |
 | `google_write_commit`, `google_write_cancel`, `google_write_list_staged` | Apply staged writes | `operation_id` |

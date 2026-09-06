@@ -65,6 +65,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces.readonly",
     "https://www.googleapis.com/auth/chat.memberships.readonly",
+    # v2.3 additions (require re-auth if an existing token lacks them):
+    # userinfo.profile for google_people_profile, chat.users.readstate for
+    # google_chat_mark_read / google_chat_mark_unread.
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/chat.users.readstate",
     "https://www.googleapis.com/auth/meetings.space.created",
     "https://www.googleapis.com/auth/meetings.space.readonly",
 ]

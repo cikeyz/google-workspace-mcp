@@ -7,7 +7,7 @@ Run with the server's own venv python from PowerShell (canonical home):
       C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\test_server.py
 
 Coverage:
-1. Tool registration (41 tools)
+1. Tool registration (71 tools, 4 prompts)
 2. Live READ checks across every service (real known IDs; read-only)
 3. Staged-write E2E per write tool with SELF-CLEANUP:
    calendar create->delete, tasks create->delete, drive folder create->trash,
@@ -96,6 +96,16 @@ EXPECTED = {
     "google_sheets_conditional_formats",
     "google_gmail_send", "google_calendar_patch",
     "google_drive_copy", "google_drive_update",
+    "google_gmail_labels_list", "google_gmail_modify_labels",
+    "google_gmail_search_threads",
+    "google_drive_recent", "google_drive_read_content", "google_drive_create_file",
+    "google_sheets_insert_dimension",
+    "google_calendar_list_calendars", "google_calendar_search_events",
+    "google_calendar_respond", "google_calendar_suggest_time",
+    "google_chat_search_conversations", "google_chat_mark_read",
+    "google_chat_mark_unread",
+    "google_people_profile", "google_people_search_contacts",
+    "google_universal_search",
 }
 missing = EXPECTED - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")

@@ -37,7 +37,7 @@ import httplib2
 from filelock import FileLock
 from google_auth_httplib2 import AuthorizedHttp
 from html.parser import HTMLParser
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -46,7 +46,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from mcp.types import ToolAnnotations
 
-mcp = FastMCP(
+mcp = MCPServer(
     "google-workspace",
     instructions=(
         "Google Workspace (staged writes). Reads run immediately; every mutating tool "
@@ -1207,9 +1207,10 @@ def google_gmail_get(message_id: str, max_body_chars: int = 8000, start_char: in
 @mcp.tool(title='List Calendar Events', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_calendar_list(start: str = "", end: str = "", max_results: int = 25,
                          page_token: str = "", q: str = "", time_zone: str = "",
-                         full: bool = False) -> dict:
+                         calendar_id: str = "primary", full: bool = False) -> dict:
     """List calendar events. start/end = ISO 8601 (e.g. '2026-08-11T00:00:00Z'); empty start = now, empty end = +7 days.
     q = free-text search, time_zone overrides, max_results default 25.
+    calendar_id defaults to 'primary'; use google_calendar_list_calendars to discover others.
     Returns an envelope {items, next_page_token, has_more, result_count} of event
     resources. Default mask keeps scheduling fields with descriptions cut at 2KB;
     full=True returns complete events. Feed next_page_token back as page_token."""
@@ -1218,7 +1219,7 @@ def google_calendar_list(start: str = "", end: str = "", max_results: int = 25,
         start = datetime.now(timezone.utc).isoformat()
     if not end:
         end = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-    params: dict = {"calendarId": "primary", "timeMin": start, "timeMax": end,
+    params: dict = {"calendarId": calendar_id or "primary", "timeMin": start, "timeMax": end,
                     "singleEvents": True, "orderBy": "startTime",
                     "maxResults": min(max_results, 2500),
                     "fields": ("items,nextPageToken" if full else
@@ -1243,19 +1244,20 @@ def google_calendar_list(start: str = "", end: str = "", max_results: int = 25,
 
 
 @mcp.tool(title='Get Calendar Event', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_calendar_get(event_id: str) -> dict:
+def google_calendar_get(event_id: str, calendar_id: str = "primary") -> dict:
     """Get one calendar event by ID. Returns the FULL event resource
     (attendees, organizer, status, description, reminders, attachments, conference data...)."""
     c = _svc("calendar", "v3")
-    return _exec(c.events().get(calendarId="primary", eventId=event_id), kind="read")
+    return _exec(c.events().get(calendarId=calendar_id or "primary", eventId=event_id), kind="read")
 
 
 @mcp.tool(title='Create Calendar Event (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 def google_calendar_create(summary: str, start: str, end: str, description: str = "",
-                           location: str = "", attendees: str = "") -> dict:
+                           location: str = "", attendees: str = "",
+                           calendar_id: str = "primary") -> dict:
     """STAGED write: create a calendar event. start/end = ISO 8601 WITH timezone
     (e.g. '2026-08-11T09:00:00+08:00'). attendees = comma-separated emails.
-    Returns a preview + operation_id; apply with google_write_commit."""
+    calendar_id defaults to 'primary'. Returns a preview + operation_id; apply with google_write_commit."""
     try:
         start_dt = datetime.fromisoformat(start)
         end_dt = datetime.fromisoformat(end)
@@ -1278,41 +1280,44 @@ def google_calendar_create(summary: str, start: str, end: str, description: str 
             body["location"] = location
         if attendee_list:
             body["attendees"] = [{"email": a} for a in attendee_list]
-        return c.events().insert(calendarId="primary", body=body).execute()
+        return c.events().insert(calendarId=calendar_id or "primary", body=body).execute()
 
     return _stage("google_calendar_create",
-                  {"summary": summary, "start": start, "end": end, "attendees": attendees},
+                  {"summary": summary, "start": start, "end": end, "attendees": attendees,
+                   "calendar_id": calendar_id},
                   apply,
                   ["start/end valid ISO8601 with tz", "end after start"],
                   {"summary": summary, "start": start, "end": end,
                    "description": description[:500], "location": location,
-                   "attendees": attendee_list}, None)
+                   "attendees": attendee_list, "calendar_id": calendar_id or "primary"}, None)
 
 
 @mcp.tool(title='Delete Calendar Event (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
-def google_calendar_delete(event_id: str) -> dict:
-    """STAGED write: delete a calendar event by ID. Returns a preview (the event being
+def google_calendar_delete(event_id: str, calendar_id: str = "primary") -> dict:
+    """STAGED write: delete a calendar event by ID. calendar_id defaults to 'primary'.
+    Returns a preview (the event being
     deleted) + operation_id; apply with google_write_commit. Refuses to stage if the
     event does not exist, and refuses to commit if it was deleted meanwhile."""
+    cid = calendar_id or "primary"
     try:
-        ev = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
+        ev = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
     except Exception as exc:
         raise RuntimeError(f"Event {event_id} not found or not accessible: {exc}") from exc
     base_etag, base_updated = ev.get("etag"), ev.get("updated")
     start = ev.get("start", {})
 
     def apply():
-        _svc("calendar", "v3").events().delete(calendarId="primary", eventId=event_id).execute()
+        _svc("calendar", "v3").events().delete(calendarId=cid, eventId=event_id).execute()
         return {"deleted": event_id}
 
     def revalidate():
-        cur = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
+        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
         if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
             raise RuntimeError("Event changed since staging; refusing to delete. Re-stage.")
 
-    return _stage("google_calendar_delete", {"event_id": event_id},
+    return _stage("google_calendar_delete", {"event_id": event_id, "calendar_id": cid},
                   apply, ["event exists"],
-                  {"event_id": event_id, "summary": ev.get("summary"),
+                  {"event_id": event_id, "calendar_id": cid, "summary": ev.get("summary"),
                    "start": start.get("dateTime") or start.get("date"),
                    "end": (ev.get("end") or {}).get("dateTime"),
                    "attendees": [a.get("emailAddress", a.get("email", "")) for a in ev.get("attendees", [])],
@@ -1604,16 +1609,23 @@ def google_chat_spaces(max_results: int = 50, page_token: str = "", full: bool =
 
 @mcp.tool(title='List Chat Messages', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_chat_messages(space_name: str, max_results: int = 50, page_token: str = "",
-                         full: bool = False) -> dict:
+                         filter_: str = "", order_by: str = "", full: bool = False) -> dict:
     """List recent messages in a Chat space. space_name like 'spaces/AAAA...'.
-    Returns an envelope {items, next_page_token, has_more, result_count} of message
-    resources. Default mask keeps text, sender, time, thread, and attachments;
-    full=True returns complete resources. Feed next_page_token back as page_token."""
+    filter_ is a messages.list filter (e.g. 'createTime > "2026-01-01T00:00:00Z"');
+    order_by like 'createTime DESC'. Returns an envelope {items, next_page_token,
+    has_more, result_count} of message resources. Default mask keeps text, sender,
+    time, thread, and attachments; full=True returns complete resources. Feed
+    next_page_token back as page_token."""
     ch = _svc("chat", "v1")
     fields = ("messages,nextPageToken" if full else
               "messages(name,text,sender,createTime,thread,attachment),nextPageToken")
-    resp = _exec(ch.spaces().messages().list(parent=space_name, pageSize=min(max_results, 1000),
-                                             pageToken=_check_page_token(page_token) or None, fields=fields), kind="read")
+    params: dict = {"parent": space_name, "pageSize": min(max_results, 1000),
+                    "pageToken": _check_page_token(page_token) or None, "fields": fields}
+    if filter_:
+        params["filter"] = filter_
+    if order_by:
+        params["orderBy"] = order_by
+    resp = _exec(ch.spaces().messages().list(**params), kind="read")
     items = resp.get("messages", [])
     token = resp.get("nextPageToken") or ""
     return {"items": items, "next_page_token": token, "has_more": bool(token),
@@ -1621,12 +1633,16 @@ def google_chat_messages(space_name: str, max_results: int = 50, page_token: str
 
 
 @mcp.tool(title='Send Chat Message (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_chat_send(space_name: str, text: str, thread_key: str = "") -> dict:
+def google_chat_send(space_name: str, text: str, thread_key: str = "", thread_name: str = "") -> dict:
     """STAGED write: send a message to a Chat space the user is in. space_name like 'spaces/AAAA...'.
-    thread_key replies inside an existing thread instead of starting a new one.
+    thread_key replies inside an app-created thread (letters/digits/-/_); thread_name
+    (like 'spaces/AAAA/threads/BBBB') replies inside any thread including human-created ones.
+    Pass exactly one of them, or neither to start a new thread.
     Returns a preview (space + exact message text) + operation_id; apply with google_write_commit."""
     if not text.strip():
         raise RuntimeError("Message text must be non-empty.")
+    if thread_key and thread_name:
+        raise RuntimeError("Pass thread_key or thread_name, not both.")
     if thread_key and (len(thread_key) > 64 or
                        any(c not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
                            for c in thread_key)):
@@ -1639,22 +1655,28 @@ def google_chat_send(space_name: str, text: str, thread_key: str = "") -> dict:
     def apply():
         ch = _svc("chat", "v1")
         body: dict = {"text": text}
+        params: dict = {"parent": space_name, "body": body,
+                        "messageId": f"client-{secrets.token_hex(8)}"}
+        # Without messageReplyOption the API ignores threadKey and starts a new
+        # thread (v2.3 fix); FALLBACK posts new instead of failing when gone.
         if thread_key:
             body["thread"] = {"threadKey": thread_key}
-        return ch.spaces().messages().create(
-            parent=space_name,
-            body=body,
-            messageId=f"client-{secrets.token_hex(8)}").execute()
+            params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        elif thread_name:
+            body["thread"] = {"name": thread_name}
+            params["messageReplyOption"] = "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+        return ch.spaces().messages().create(**params).execute()
 
     def revalidate():
         _svc("chat", "v1").spaces().get(name=space_name).execute()  # 404 -> refuse
 
     return _stage("google_chat_send", {"space_name": space_name, "text": text,
-                                       "thread_key": thread_key},
+                                       "thread_key": thread_key, "thread_name": thread_name},
                   apply,
                   ["text non-empty", f"space exists ({space.get('displayName', space_name)})"],
                   {"space_name": space_name, "space_display": space.get("displayName", ""),
-                   "thread_key": thread_key, "text": text, "text_chars": len(text)}, revalidate)
+                   "thread_key": thread_key, "thread_name": thread_name,
+                   "text": text, "text_chars": len(text)}, revalidate)
 
 
 # ---------------------------------------------------------------- Meet
@@ -1855,12 +1877,17 @@ def google_gmail_send(to: str, subject: str, body: str, cc: str = "", bcc: str =
 
 @mcp.tool(title='Patch Calendar Event (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
 def google_calendar_patch(event_id: str, summary: str = "", start: str = "", end: str = "",
-                          description: str = "", location: str = "") -> dict:
+                          description: str = "", location: str = "", attendees: str = "__unchanged__",
+                          visibility: str = "", calendar_id: str = "primary") -> dict:
     """STAGED write: reschedule or edit an event (only the given fields change).
-    Empty string = no change. Returns a preview + operation_id; apply with
+    Empty string = no change. attendees = comma-separated emails REPLACING the whole
+    attendee list (pass empty list via attendees="" is a no-op; use respond tool for RSVP).
+    visibility = default/private/public/confidential. calendar_id defaults to 'primary'.
+    Returns a preview + operation_id; apply with
     google_write_commit. Refuses to commit if the event changed since staging."""
+    cid = calendar_id or "primary"
     try:
-        ev = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
+        ev = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
     except Exception as exc:
         raise RuntimeError(f"Event {event_id} not found: {exc}") from exc
     patch: dict = {}
@@ -1874,22 +1901,28 @@ def google_calendar_patch(event_id: str, summary: str = "", start: str = "", end
         patch["description"] = description
     if location:
         patch["location"] = location
+    if attendees != "__unchanged__":
+        patch["attendees"] = [{"email": a.strip()} for a in attendees.split(",") if a.strip()]
+    if visibility:
+        if visibility not in {"default", "public", "private", "confidential"}:
+            raise RuntimeError(f"visibility must be default/public/private/confidential (got {visibility!r}).")
+        patch["visibility"] = visibility
     if not patch:
-        raise RuntimeError("Nothing to change: pass at least one of summary/start/end/description/location.")
+        raise RuntimeError("Nothing to change: pass at least one of summary/start/end/description/location/attendees/visibility.")
     base_etag, base_updated = ev.get("etag"), ev.get("updated")
 
     def apply():
         c = _svc("calendar", "v3")
-        return c.events().patch(calendarId="primary", eventId=event_id, body=patch).execute()
+        return c.events().patch(calendarId=cid, eventId=event_id, body=patch).execute()
 
     def revalidate():
-        cur = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
+        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
         if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
             raise RuntimeError("Event changed since staging; refusing to overwrite. Re-stage.")
 
-    return _stage("google_calendar_patch", {"event_id": event_id, **patch},
+    return _stage("google_calendar_patch", {"event_id": event_id, "calendar_id": cid, **patch},
                   apply, ["event exists", "at least one field"],
-                  {"event_id": event_id, "current_summary": ev.get("summary"),
+                  {"event_id": event_id, "calendar_id": cid, "current_summary": ev.get("summary"),
                    "current_start": (ev.get("start") or {}).get("dateTime"),
                    "requested": patch}, revalidate)
 
@@ -1961,6 +1994,572 @@ def google_drive_update(file_id: str, name: str = "", add_parents: str = "",
                   {"file_id": file_id, "current_name": cur.get("name"),
                    "requested_name": name or "(unchanged)",
                    "add_parents": add_parents, "remove_parents": remove_parents}, revalidate)
+
+
+# ---------------------------------------------------------------- v2.3 additions
+
+_GMAIL_LABEL_OPS = frozenset({"add", "remove"})
+
+
+@mcp.tool(title='List Gmail Labels', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_gmail_labels_list() -> dict:
+    """List Gmail labels (id, name, type). Label IDs are the input to
+    google_gmail_modify_labels. Read-only."""
+    g = _svc("gmail", "v1")
+    resp = _exec(g.users().labels().list(userId="me"), kind="read")
+    items = resp.get("labels", [])
+    return {"items": items, "result_count": len(items)}
+
+
+@mcp.tool(title='Modify Gmail Labels (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_gmail_modify_labels(message_id: str, add_label_ids: str = "",
+                               remove_label_ids: str = "") -> dict:
+    """STAGED write: add/remove Gmail labels on one message (comma-separated label IDs,
+    e.g. 'UNREAD,STARRED'; use google_gmail_labels_list to discover IDs).
+    Returns a preview + operation_id; apply with google_write_commit.
+    Refuses to commit if labels changed since staging."""
+    add = [x.strip() for x in add_label_ids.split(",") if x.strip()]
+    remove = [x.strip() for x in remove_label_ids.split(",") if x.strip()]
+    if not add and not remove:
+        raise RuntimeError("Nothing to change: pass add_label_ids and/or remove_label_ids.")
+    try:
+        cur = _svc("gmail", "v1").users().messages().get(
+            userId="me", id=message_id, format="metadata",
+            metadataHeaders=["Subject"]).execute()
+    except Exception as exc:
+        raise RuntimeError(f"Message {message_id} not found: {exc}") from exc
+    base_labels = sorted(cur.get("labelIds", []))
+    hdrs = {h["name"]: h["value"] for h in cur.get("payload", {}).get("headers", [])}
+
+    def apply():
+        g = _svc("gmail", "v1")
+        body: dict = {}
+        if add:
+            body["addLabelIds"] = add
+        if remove:
+            body["removeLabelIds"] = remove
+        return g.users().messages().modify(userId="me", id=message_id, body=body).execute()
+
+    def revalidate():
+        now = _svc("gmail", "v1").users().messages().get(
+            userId="me", id=message_id, format="minimal").execute()
+        if sorted(now.get("labelIds", [])) != base_labels:
+            raise RuntimeError("Message labels changed since staging. Re-stage.")
+
+    return _stage("google_gmail_modify_labels",
+                  {"message_id": message_id, "add_label_ids": add_label_ids,
+                   "remove_label_ids": remove_label_ids},
+                  apply, ["message exists", "at least one label change"],
+                  {"message_id": message_id, "subject": hdrs.get("Subject", ""),
+                   "labels_before": base_labels, "add": add, "remove": remove}, revalidate)
+
+
+@mcp.tool(title='Search Gmail Threads', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_gmail_search_threads(query: str = "", label_ids: str = "", max_results: int = 10,
+                                page_token: str = "") -> dict:
+    """Search Gmail at thread level (read-only). query = Gmail search syntax;
+    label_ids = comma-separated label IDs to restrict. Returns an envelope
+    {items, next_page_token, has_more, result_count} of threads (id, historyId,
+    snippet). Pair with google_gmail_thread_get for per-message detail."""
+    g = _svc("gmail", "v1")
+    params: dict = {"userId": "me", "q": query or None,
+                    "maxResults": min(max_results, 500),
+                    "pageToken": _check_page_token(page_token) or None}
+    if label_ids.strip():
+        params["labelIds"] = [x.strip() for x in label_ids.split(",") if x.strip()]
+    resp = _exec(g.users().threads().list(**params), kind="read")
+    items = resp.get("threads", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
+
+
+@mcp.tool(title='List Recent Drive Files', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_drive_recent(max_results: int = 10, order: str = "recency",
+                        page_token: str = "", full: bool = False) -> dict:
+    """List recent Drive files (read-only). order = recency (default), modifiedTime,
+    or modifiedByMeTime. Empty-query shortcut without inventing query syntax.
+    Returns the standard Drive envelope."""
+    if order not in {"recency", "modifiedTime", "modifiedByMeTime"}:
+        raise RuntimeError(f"order must be recency/modifiedTime/modifiedByMeTime (got {order!r}).")
+    order_by = {"recency": "recency desc", "modifiedTime": "modifiedTime desc",
+                "modifiedByMeTime": "modifiedByMeTime desc"}[order]
+    d = _svc("drive", "v3")
+    fields = ("nextPageToken,files(*)" if full else
+              "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,"
+              "trashed,parents,owners(displayName,emailAddress),webViewLink,"
+              "capabilities(canDownload))")
+    resp = _exec(d.files().list(
+        q="trashed=false", pageSize=min(max_results, 1000), fields=fields,
+        orderBy=order_by, pageToken=_check_page_token(page_token) or None), kind="read")
+    items = resp.get("files", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
+
+
+@mcp.tool(title='Read Drive File Content', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: int = 0) -> dict:
+    """Read a Drive file as inline text (read-only, no local download). Google Docs
+    and Slides export to text, Sheets to CSV, text/* files read directly. Drawings,
+    images, and binaries are refused (use google_drive_download for those).
+    Text is budgeted at max_chars with truncation flags; re-call with start_char
+    advanced to page long files."""
+    d = _svc("drive", "v3")
+    meta = _exec(d.files().get(fileId=file_id, fields="id,name,mimeType,size"), kind="read")
+    mime = meta.get("mimeType", "")
+    name = meta.get("name", file_id)
+    if mime == "application/vnd.google-apps.document":
+        req = d.files().export_media(fileId=file_id, mimeType="text/plain")
+    elif mime == "application/vnd.google-apps.spreadsheet":
+        req = d.files().export_media(fileId=file_id, mimeType="text/csv")
+    elif mime == "application/vnd.google-apps.presentation":
+        req = d.files().export_media(fileId=file_id, mimeType="text/plain")
+    elif mime.startswith("text/") or mime in {"application/json", "application/xml"}:
+        req = d.files().get_media(fileId=file_id)
+    else:
+        raise RuntimeError(
+            f"File {file_id} ({mime}) has no text representation; "
+            "use google_drive_download to fetch the bytes.")
+    buf = io.BytesIO()
+    downloader = MediaIoBaseDownload(buf, req, chunksize=8 * 1024 * 1024)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    text = buf.getvalue().decode("utf-8", errors="replace")
+    start = max(0, start_char)
+    window = text[start:start + max_chars]
+    cut = (start + len(window)) < len(text)
+    return {"id": file_id, "name": name, "mimeType": mime, "text": window,
+            "text_start": start, "next_start_char": (start + len(window)) if cut else None,
+            "text_truncated": cut, "text_chars": len(text)}
+
+
+@mcp.tool(title='Create Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
+def google_drive_create_file(name: str, text_content: str = "", mime_type: str = "text/plain",
+                             parent_folder_id: str = "") -> dict:
+    """STAGED write: create a Drive file with inline text content (no local file needed).
+    For local-file uploads use google_drive_upload. Text capped at 5MB.
+    Returns a preview + operation_id; apply with google_write_commit."""
+    if not name.strip():
+        raise RuntimeError("name must be non-empty.")
+    data = text_content.encode("utf-8")
+    if len(data) > 5 * 1024 * 1024:
+        raise RuntimeError(f"text_content is {len(data)} bytes; cap is 5MB (use upload for larger).")
+    if parent_folder_id:
+        try:
+            parent = _svc("drive", "v3").files().get(
+                fileId=parent_folder_id, fields="id,name,mimeType,trashed").execute()
+            if parent.get("trashed"):
+                raise RuntimeError(f"Parent folder {parent_folder_id} is trashed.")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Parent folder {parent_folder_id} not accessible: {exc}") from exc
+
+    def apply():
+        from googleapiclient.http import MediaInMemoryUpload
+        d = _svc("drive", "v3")
+        body: dict = {"name": name, "mimeType": mime_type}
+        if parent_folder_id:
+            body["parents"] = [parent_folder_id]
+        media = MediaInMemoryUpload(data, mimetype=mime_type, resumable=True)
+        return d.files().create(body=body, media_body=media, fields="*").execute()
+
+    return _stage("google_drive_create_file",
+                  {"name": name, "mime_type": mime_type, "parent_folder_id": parent_folder_id},
+                  apply, ["name non-empty", "content within 5MB cap"],
+                  {"name": name, "mime_type": mime_type, "content_chars": len(text_content),
+                   "content_preview": text_content[:500],
+                   "parent_folder_id": parent_folder_id or "(root)"}, None)
+
+
+@mcp.tool(title='Insert Sheet Dimension (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+def google_sheets_insert_dimension(spreadsheet_id: str, sheet_id: int, dimension: str,
+                                   start_index: int, end_index: int,
+                                   inherit_from_before: bool = True) -> dict:
+    """STAGED write: insert empty rows or columns into one sheet tab (shifts existing
+    cells). dimension = ROWS or COLUMNS; indexes are 0-based, end exclusive.
+    Use google_sheets_metadata to find sheet_id. Returns a preview + operation_id;
+    apply with google_write_commit. Refuses to commit if the grid changed since staging."""
+    if dimension not in {"ROWS", "COLUMNS"}:
+        raise RuntimeError(f"dimension must be ROWS or COLUMNS (got {dimension!r}).")
+    if start_index < 0 or end_index <= start_index:
+        raise RuntimeError(f"Need 0 <= start_index < end_index (got {start_index}/{end_index}).")
+    s = _svc("sheets", "v4")
+    try:
+        meta = _exec(s.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="properties.title,sheets(properties(sheetId,title,gridProperties))"),
+            kind="read")
+    except Exception as exc:
+        raise RuntimeError(f"Spreadsheet {spreadsheet_id} not accessible: {exc}") from exc
+    tab = next((t["properties"] for t in meta.get("sheets", [])
+                if t["properties"].get("sheetId") == sheet_id), None)
+    if tab is None:
+        raise RuntimeError(f"sheet_id {sheet_id} not found in spreadsheet {spreadsheet_id}.")
+
+    def apply():
+        s2 = _svc("sheets", "v4")
+        return s2.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={
+            "requests": [{"insertDimension": {
+                "range": {"sheetId": sheet_id, "dimension": dimension,
+                          "startIndex": start_index, "endIndex": end_index},
+                "inheritFromBefore": inherit_from_before}}]}).execute()
+
+    def revalidate():
+        cur = _svc("sheets", "v4").spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets(properties(sheetId))").execute()
+        if not any(t["properties"].get("sheetId") == sheet_id
+                   for t in cur.get("sheets", [])):
+            raise RuntimeError("Sheet tab disappeared since staging. Re-stage.")
+
+    return _stage("google_sheets_insert_dimension",
+                  {"spreadsheet_id": spreadsheet_id, "sheet_id": sheet_id,
+                   "dimension": dimension, "start_index": start_index, "end_index": end_index},
+                  apply, ["spreadsheet + tab exist", "index range valid"],
+                  {"spreadsheet": meta.get("properties", {}).get("title", spreadsheet_id),
+                   "tab": tab.get("title"), "dimension": dimension,
+                   "insert_count": end_index - start_index,
+                   "at_index": start_index,
+                   "inherit_from_before": inherit_from_before}, revalidate)
+
+
+@mcp.tool(title='List Calendars', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_calendar_list_calendars(max_results: int = 50, page_token: str = "") -> dict:
+    """List the calendars in the user's calendar list (id, summary, accessRole...).
+    Feed an id back as calendar_id to the event tools. Read-only."""
+    c = _svc("calendar", "v3")
+    resp = _exec(c.calendarList().list(
+        maxResults=min(max_results, 250), pageToken=_check_page_token(page_token) or None,
+        fields="items(id,summary,description,primary,accessRole),nextPageToken"), kind="read")
+    items = resp.get("items", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
+
+
+@mcp.tool(title='Search Calendar Events', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_calendar_search_events(q: str, start: str = "", end: str = "",
+                                  calendar_id: str = "primary",
+                                  max_results: int = 25, page_token: str = "") -> dict:
+    """Free-text search of calendar events (summary/description/location/attendees).
+    q is required. Wide time window by default (past 30 days to +90 days); narrow
+    with start/end ISO 8601. Read-only; same envelope as google_calendar_list."""
+    if not q.strip():
+        raise RuntimeError("q must be non-empty (use google_calendar_list for plain listing).")
+    if not start:
+        start = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    if not end:
+        end = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
+    return google_calendar_list(start=start, end=end, max_results=max_results,
+                                page_token=page_token, q=q,
+                                calendar_id=calendar_id or "primary")
+
+
+@mcp.tool(title='Respond to Event (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_calendar_respond(event_id: str, response: str, calendar_id: str = "primary") -> dict:
+    """STAGED write: set your RSVP on an event (accepted, tentative, or declined).
+    Only your own attendee entry changes; the event itself is untouched.
+    Returns a preview + operation_id; apply with google_write_commit."""
+    if response not in {"accepted", "tentative", "declined"}:
+        raise RuntimeError(f"response must be accepted/tentative/declined (got {response!r}).")
+    cid = calendar_id or "primary"
+    try:
+        ev = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
+    except Exception as exc:
+        raise RuntimeError(f"Event {event_id} not found: {exc}") from exc
+    self_att = next((a for a in ev.get("attendees", []) if a.get("self")), None)
+    if self_att is None:
+        raise RuntimeError("You are not an attendee of this event (organizer or no attendees); nothing to RSVP.")
+    base_etag, base_updated = ev.get("etag"), ev.get("updated")
+    before = self_att.get("responseStatus")
+
+    def apply():
+        c = _svc("calendar", "v3")
+        attendees = []
+        for a in ev.get("attendees", []):
+            entry = {"email": a.get("email")}
+            entry["responseStatus"] = response if a.get("self") else a.get("responseStatus", "needsAction")
+            attendees.append(entry)
+        return c.events().patch(calendarId=cid, eventId=event_id,
+                                body={"attendees": attendees}).execute()
+
+    def revalidate():
+        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
+        if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
+            raise RuntimeError("Event changed since staging; refusing. Re-stage.")
+
+    return _stage("google_calendar_respond", {"event_id": event_id, "response": response,
+                                              "calendar_id": cid},
+                  apply, ["event exists", "you are an attendee"],
+                  {"event_id": event_id, "summary": ev.get("summary"),
+                   "start": (ev.get("start") or {}).get("dateTime"),
+                   "rsvp_before": before, "rsvp_after": response}, revalidate)
+
+
+@mcp.tool(title='Suggest Meeting Time', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_calendar_suggest_time(time_min: str, time_max: str, duration_minutes: int,
+                                 calendar_ids: list | None = None) -> dict:
+    """Suggest free slots (read-only compute over freebusy). time_min/max ISO 8601,
+    duration_minutes >= 15. calendar_ids default ['primary']. Returns up to 20 free
+    windows that fit the duration, earliest first."""
+    if duration_minutes < 15:
+        raise RuntimeError("duration_minutes must be >= 15.")
+    c = _svc("calendar", "v3")
+    body = {"timeMin": time_min, "timeMax": time_max,
+            "items": [{"id": cid} for cid in (calendar_ids or ["primary"])]}
+    fb = _exec(c.freebusy().query(body=body), kind="read")
+    busy: list = []
+    for cal in (fb.get("calendars") or {}).values():
+        for b in cal.get("busy", []):
+            try:
+                busy.append((datetime.fromisoformat(b["start"].replace("Z", "+00:00")),
+                             datetime.fromisoformat(b["end"].replace("Z", "+00:00"))))
+            except (KeyError, ValueError):
+                continue
+    busy.sort()
+    window_start = datetime.fromisoformat(time_min.replace("Z", "+00:00"))
+    window_end = datetime.fromisoformat(time_max.replace("Z", "+00:00"))
+    if window_end <= window_start:
+        raise RuntimeError("time_max must be after time_min.")
+    need = timedelta(minutes=duration_minutes)
+    slots: list = []
+    cursor = window_start
+    for b_start, b_end in busy:
+        if b_start - cursor >= need:
+            slots.append({"start": cursor.isoformat(), "end": (cursor + need).isoformat()})
+            if len(slots) >= 20:
+                break
+        if b_end > cursor:
+            cursor = b_end
+    if len(slots) < 20 and window_end - cursor >= need:
+        slots.append({"start": cursor.isoformat(), "end": (cursor + need).isoformat()})
+    return {"slots": slots[:20], "slot_count": min(len(slots), 20),
+            "window": {"start": time_min, "end": time_max},
+            "duration_minutes": duration_minutes}
+
+
+@mcp.tool(title='Search Chat Conversations', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_chat_search_conversations(query: str, max_results: int = 20) -> dict:
+    """Search the Chat spaces you belong to by name (read-only). query matches space
+    display names case-insensitively (e.g. 'standup'). Returns an envelope {items,
+    next_page_token, has_more, result_count}. Feed a space name back to
+    google_chat_messages."""
+    # NOTE: spaces.search 400s for consumer accounts even with qualified queries,
+    # so this is list+client-side filter (same pattern as google_people_search).
+    listed = google_chat_spaces(max_results=1000)
+    q = query.lower()
+    items = [s for s in listed.get("items", [])
+             if q in (s.get("displayName") or "").lower()][:max_results]
+    return {"items": items, "next_page_token": "", "has_more": False,
+            "result_count": len(items)}
+
+
+def _chat_space_read_state(space_name: str) -> dict:
+    """Fetch the user's read state for a space (needs chat.users.readstate scope)."""
+    if not space_name.startswith("spaces/"):
+        raise RuntimeError(f"space_name must look like 'spaces/AAAA' (got {space_name!r}).")
+    space_id = space_name.split("/", 1)[1]
+    name = f"users/me/spaces/{space_id}/spaceReadState"
+    try:
+        return _exec(_svc("chat", "v1").users().spaces().getSpaceReadState(name=name),
+                     kind="read")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot read read-state for {space_name}: {exc}. "
+            "This needs the 'chat.users.readstate' scope: re-run setup.py --auth-url.") from exc
+
+
+@mcp.tool(title='Mark Chat Read (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_chat_mark_read(space_name: str) -> dict:
+    """STAGED write: mark a Chat space as read up to now (clears your unread badge).
+    Space-level only; thread replies keep their own state. Returns a preview +
+    operation_id; apply with google_write_commit."""
+    state = _chat_space_read_state(space_name)
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    space_id = space_name.split("/", 1)[1]
+    name = f"users/me/spaces/{space_id}/spaceReadState"
+
+    def apply():
+        return _svc("chat", "v1").users().spaces().updateSpaceReadState(
+            name=name, updateMask="lastReadTime",
+            body={"name": name, "lastReadTime": now}).execute()
+
+    return _stage("google_chat_mark_read", {"space_name": space_name},
+                  apply, ["space exists", "read-state readable"],
+                  {"space_name": space_name, "last_read_before": state.get("lastReadTime"),
+                   "last_read_after": now}, None)
+
+
+@mcp.tool(title='Mark Chat Unread (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_chat_mark_unread(space_name: str) -> dict:
+    """STAGED write: mark a Chat space as unread (restores your unread badge from the
+    latest message). Space-level only. Returns a preview + operation_id; apply with
+    google_write_commit."""
+    state = _chat_space_read_state(space_name)
+    try:
+        latest = _exec(_svc("chat", "v1").spaces().messages().list(
+            parent=space_name, pageSize=1, orderBy="createTime DESC",
+            fields="messages(createTime)"), kind="read").get("messages", [])
+    except Exception as exc:
+        raise RuntimeError(f"Cannot list messages in {space_name}: {exc}") from exc
+    if not latest or not latest[0].get("createTime"):
+        raise RuntimeError(f"No messages in {space_name}; nothing to mark unread.")
+    try:
+        mark_at = (datetime.fromisoformat(latest[0]["createTime"].replace("Z", "+00:00"))
+                   - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    except ValueError as exc:
+        raise RuntimeError(f"Unparseable message time: {exc}") from exc
+    space_id = space_name.split("/", 1)[1]
+    name = f"users/me/spaces/{space_id}/spaceReadState"
+
+    def apply():
+        return _svc("chat", "v1").users().spaces().updateSpaceReadState(
+            name=name, updateMask="lastReadTime",
+            body={"name": name, "lastReadTime": mark_at}).execute()
+
+    return _stage("google_chat_mark_unread", {"space_name": space_name},
+                  apply, ["space exists", "space has messages"],
+                  {"space_name": space_name, "last_read_before": state.get("lastReadTime"),
+                   "last_read_after": mark_at}, None)
+
+
+@mcp.tool(title='Get My Profile', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_people_profile() -> dict:
+    """Get your own Google profile (names, email addresses, photos). Read-only.
+    Needs the 'userinfo.profile' scope: if this 403s, re-run setup.py --auth-url."""
+    p = _svc("people", "v1")
+    try:
+        return _exec(p.people().get(
+            resourceName="people/me",
+            personFields="names,emailAddresses,photos"), kind="read")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot read profile: {exc}. Re-run setup.py --auth-url to grant "
+            "'userinfo.profile'.") from exc
+
+
+@mcp.tool(title='Search Contacts (server-side)', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_people_search_contacts(query: str, max_results: int = 10) -> dict:
+    """Server-side contact search (read-only, prefix match on names, emails, phones,
+    organizations). Faster and more complete than the client-side google_people_search
+    scan; returns an envelope {items, result_count} (API caps at 30)."""
+    if not query.strip():
+        raise RuntimeError("query must be non-empty.")
+    p = _svc("people", "v1")
+    resp = _exec(p.people().searchContacts(
+        query=query.strip(), pageSize=min(max_results, 30),
+        readMask="names,emailAddresses,organizations,phoneNumbers"), kind="read")
+    items = resp.get("results", [])
+    return {"items": items, "result_count": len(items)}
+
+
+@mcp.tool(title='Universal Search', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
+def google_universal_search(query: str, sources: list | None = None,
+                            max_per_source: int = 5) -> dict:
+    """Fan one query out across Gmail, Drive, Calendar, and Contacts in a single call
+    (read-only). sources defaults to all four; pass a subset like ["drive","gmail"].
+    Chat is opt-in via sources=["chat"] (lists spaces then fans out, capped).
+    Returns {query, sources_queried, results: {source: envelope}, errors: {source: error},
+    result_count}. One source failing never kills the rest."""
+    if not query.strip():
+        raise RuntimeError("query must be non-empty.")
+    wanted = sources or ["drive", "gmail", "calendar", "people"]
+    wanted = [s for s in wanted if s in {"drive", "gmail", "calendar", "people", "chat"}]
+    if not wanted:
+        raise RuntimeError("sources must include at least one of drive/gmail/calendar/people/chat.")
+    cap = min(max(1, max_per_source), 20)
+    results: dict = {}
+    errors: dict = {}
+    total = 0
+    now = datetime.now(timezone.utc)
+    for src in wanted:
+        try:
+            if src == "drive":
+                env = google_drive_search(query=query, max_results=cap)
+            elif src == "gmail":
+                env = google_gmail_search(query=query, max_results=cap)
+            elif src == "calendar":
+                env = google_calendar_list(
+                    start=(now - timedelta(days=30)).isoformat(),
+                    end=(now + timedelta(days=90)).isoformat(),
+                    max_results=cap, q=query)
+            elif src == "people":
+                env = google_people_search_contacts(query=query, max_results=cap)
+            else:  # chat: list spaces, then per-space message list (N+1, capped)
+                spaces = google_chat_spaces(max_results=min(10, cap * 2)).get("items", [])
+                chat_items: list = []
+                for sp in spaces[:10]:
+                    try:
+                        msgs = google_chat_messages(space_name=sp["name"], max_results=cap)
+                        for m in msgs.get("items", []):
+                            if query.lower() in (m.get("text") or "").lower():
+                                chat_items.append({"space": sp.get("displayName"), **m})
+                    except Exception:
+                        continue
+                env = {"items": chat_items[:cap], "result_count": len(chat_items[:cap]),
+                       "has_more": len(chat_items) > cap}
+            results[src] = env
+            total += env.get("result_count", 0)
+        except Exception as exc:  # noqa: BLE001 - per-source isolation is the point
+            results[src] = {"items": [], "result_count": 0}
+            errors[src] = str(exc)[:300]
+    return {"query": query, "sources_queried": wanted, "results": results,
+            "errors": errors, "result_count": total}
+
+
+# ---------------------------------------------------------------- v2.3 prompts
+
+@mcp.prompt(title="Triage inbox")
+def triage_inbox(time_window: str, max_items: int = 25) -> str:
+    """Rank unread mail into act/waiting/fyi with draft next actions."""
+    return (
+        f"Rank the user's unread mail from the last {time_window} into three buckets: "
+        "act (needs a reply or decision), waiting (blocked on someone else), fyi (no action). "
+        f"Steps: 1) call google_gmail_search with query like 'is:unread newer_than:{time_window}' "
+        f"and max_results={max_items}; 2) call google_gmail_thread_get per candidate for context; "
+        "3) for act items propose the reply inline and stage follow-ups with google_tasks_create "
+        "or google_calendar_create (stage only, never commit without the user reviewing). "
+        "Output: one line per mail (sender, subject, bucket, one-line why) then proposed next actions."
+    )
+
+
+@mcp.prompt(title="Prep meeting brief")
+def prep_meeting_brief(event_id: str = "", query: str = "") -> str:
+    """Build a brief for one meeting: attendees, context threads, related files."""
+    return (
+        "Build a meeting brief. Steps: 1) get the event with google_calendar_get(event_id="
+        f"{event_id!r}) or find it via google_calendar_list with q={query!r}; 2) resolve each "
+        "attendee with google_people_search_contacts; 3) pull context with google_gmail_search "
+        "'from:<attendee>' and google_drive_search on the meeting topic; 4) check conflicts with "
+        "google_calendar_freebusy around the event. Output: attendees + roles, 3-5 context bullets "
+        "with sources, open questions, suggested prep. Do not stage or commit anything."
+    )
+
+
+@mcp.prompt(title="Summarize thread")
+def summarize_thread(thread_id: str, detail: str = "short") -> str:
+    """Summarize one Gmail thread with decisions and open questions."""
+    return (
+        f"Summarize Gmail thread {thread_id} at detail level {detail} (short = 5 lines max, "
+        "full = per-participant positions). Steps: 1) call google_gmail_thread_get for structure; "
+        "2) call google_gmail_get only for messages whose snippet is insufficient; 3) report "
+        "decisions made, open questions, and who owes what to whom. Read-only: change nothing."
+    )
+
+
+@mcp.prompt(title="Find anything")
+def find_anything(query: str, surfaces: str = "all") -> str:
+    """Fan one query out across Gmail, Drive, Calendar, and Contacts, then merge hits."""
+    return (
+        f"Find everything about {query!r} (surfaces: {surfaces}). Steps: call google_universal_search "
+        "with the query (restrict sources if surfaces names any), or fan out manually with "
+        "google_gmail_search, google_drive_search, google_calendar_list(q=...), and "
+        "google_people_search_contacts in parallel when a source needs special args. Merge by ID, "
+        "rank by recency, cite which surface each hit came from. Read-only."
+    )
 
 
 def main() -> None:
