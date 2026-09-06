@@ -1,6 +1,9 @@
 # Google Workspace MCP
 
-A Model Context Protocol server that gives coding agents full, honest access to Google Workspace: Gmail, Drive, Docs, Sheets, Slides, Forms, Calendar, People, Tasks, Chat, and Meet. 41 tools. Every read returns the whole API resource, every write is staged, reviewed, then committed.
+A Model Context Protocol server that gives coding agents full, honest access to Google Workspace: Gmail, Drive, Docs, Sheets, Slides, Forms, Calendar, People, Tasks, Chat, and Meet. 54 tools. Every read returns the whole API resource, every write is staged, reviewed, then committed.
+
+> v2.1 note: list tools return cursor envelopes (`items`, `next_page_token`,
+> `has_more`) instead of bare arrays. See `docs/MIGRATION-v2.md`.
 
 ## Why this one
 

@@ -1,6 +1,14 @@
 # Changelog
 
-## v2.0.0 (2026-09-06) — non-breaking
+## v2.1.0 (2026-09-06) — BREAKING list envelopes
+
+All 10 list tools return `{items, next_page_token, has_more, result_count}` instead of
+bare arrays (plus `result_size_estimate` on Gmail, `total_items` on People). New
+`page_token`/`full` params, raised caps (Drive 1000, Gmail 500, Calendar 2500),
+per-tool fields masks, truncation flags, Sheets render/input options (USER_ENTERED
+default), chat thread replies, Meet config, Drive copy/update, Gmail send, calendar
+patch, and 9 more read tools. See MIGRATION-v2.md. Non-breaking consumers: none,
+every list caller must switch to `["items"]`.
 
 Added (13 tools, 41 to 54, no signature changes to existing tools):
 - Reads: gmail thread get, gmail attachment download, people search/get, tasks get, drive permissions audit, chat members, calendar freebusy, sheets conditional formats.

@@ -2,9 +2,9 @@
 r"""Full test battery for the personal google-workspace MCP server.
 
 Run with the server's own venv python from PowerShell (canonical home):
-    $env:HERMES_HOME = "C:\Users\you\AppData\Local\hermes"  # state home until Phase 2
-    C:\Users\you\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
-      C:\Users\you\.agents\mcps\google-workspace\setup\tests\test_server.py
+    $env:HERMES_HOME = "C:\Users\YOU\AppData\Local\hermes"  # state home until Phase 2
+    C:\Users\YOU\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
+      C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\test_server.py
 
 Coverage:
 1. Tool registration (41 tools)
@@ -142,32 +142,39 @@ except Exception as e:
     check("docs_read live", False, str(e)[:160])
 
 try:
-    msgs = mod.google_gmail_search("newer_than:90d", 3)
+    res = mod.google_gmail_search("newer_than:90d", 3)
+    msgs = res["items"]
     check("gmail_search live", isinstance(msgs, list), f"{len(msgs)} msgs")
+    check("gmail_search envelope", {"items", "next_page_token", "has_more"} <= set(res), "")
 except Exception as e:
     check("gmail_search live", False, str(e)[:160])
 
 try:
-    evs = mod.google_calendar_list(max_results=5)
+    res = mod.google_calendar_list(max_results=5)
+    evs = res["items"]
     check("calendar_list live", isinstance(evs, list), f"{len(evs)} events")
+    check("calendar_list envelope", {"items", "next_page_token", "has_more"} <= set(res), "")
 except Exception as e:
     check("calendar_list live", False, str(e)[:160])
 
 try:
-    tls = mod.google_tasks_lists()
+    res = mod.google_tasks_lists()
+    tls = res["items"]
     check("tasks_lists live", isinstance(tls, list), f"{len(tls)} lists")
 except Exception as e:
     check("tasks_lists live", False, str(e)[:160])
 
 try:
-    spaces = mod.google_chat_spaces(5)
+    res = mod.google_chat_spaces(5)
+    spaces = res["items"]
     check("chat_spaces live", isinstance(spaces, list), f"{len(spaces)} spaces")
 except Exception as e:
     check("chat_spaces live", False, str(e)[:160])
+    spaces = []
 
 # ---------------------------------------------------------------- 3. pre-clean leftovers
 try:
-    leftovers = mod.google_drive_search(f"name contains '{PREFIX}'", 50)
+    leftovers = mod.google_drive_search(f"name contains '{PREFIX}'", 50)["items"]
     for f in leftovers:
         if not f.get("trashed"):
             mod.google_write_commit(mod.google_drive_trash(f["id"])["operation_id"])
@@ -185,14 +192,14 @@ try:
                                     (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
                                     (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat())
     check("calendar create staged (nothing applied)",
-          not [e for e in mod.google_calendar_list(max_results=50) if e.get("summary", "").startswith(PREFIX)])
+          not [e for e in mod.google_calendar_list(max_results=50)["items"] if e.get("summary", "").startswith(PREFIX)])
     ev = commit_ok("calendar create committed", st)
     check("calendar create verified live", bool(
-        [e for e in mod.google_calendar_list(max_results=50) if e.get("id") == ev.get("id")]))
+        [e for e in mod.google_calendar_list(max_results=50)["items"] if e.get("id") == ev.get("id")]))
     check("calendar delete previews target", mod.google_calendar_delete(ev["id"])["preview"].get("summary", "").startswith(PREFIX))
     commit_ok("calendar delete committed", mod.google_calendar_delete(ev["id"]))
     check("calendar delete verified gone", not [
-        e for e in mod.google_calendar_list(max_results=50) if e.get("id") == ev.get("id")])
+        e for e in mod.google_calendar_list(max_results=50)["items"] if e.get("id") == ev.get("id")])
 except Exception as e:
     check("calendar E2E cycle", False, str(e)[:200])
 
@@ -200,11 +207,11 @@ except Exception as e:
 try:
     st = mod.google_tasks_create("@default", f"{PREFIX}TASK-{stamp}")
     tk = commit_ok("tasks create committed", st)
-    found = [x for x in mod.google_tasks_list("@default", 100) if x.get("id") == tk.get("id")]
+    found = [x for x in mod.google_tasks_list("@default", 100)["items"] if x.get("id") == tk.get("id")]
     check("tasks create verified live", bool(found))
     commit_ok("tasks delete committed", mod.google_tasks_delete("@default", tk["id"]))
     check("tasks delete verified gone", not [
-        x for x in mod.google_tasks_list("@default", 100) if x.get("id") == tk.get("id")])
+        x for x in mod.google_tasks_list("@default", 100)["items"] if x.get("id") == tk.get("id")])
 except Exception as e:
     check("tasks E2E cycle", False, str(e)[:200])
 
@@ -250,7 +257,7 @@ except Exception as e:
 # 4g. Stage-only tools (never commit): chat_send (visible to people), meet (no delete API),
 # gmail_send (sent mail cannot be un-sent)
 try:
-    spaces = mod.google_chat_spaces(5)
+    spaces = mod.google_chat_spaces(5)["items"]
 except Exception:
     spaces = []
 try:
@@ -332,7 +339,8 @@ except Exception as e:
     check("drive_permissions live", False, str(e)[:160])
 try:
     if spaces:
-        check("chat_members live", isinstance(mod.google_chat_members(spaces[0]["name"], 5), list), "")
+        res = mod.google_chat_members(spaces[0]["name"], 5)
+        check("chat_members live", isinstance(res.get("items"), list), f"{res.get('result_count', 0)} members")
     else:
         skipped("chat_members live", "no chat spaces visible")
 except Exception as e:
@@ -343,7 +351,7 @@ try:
 except Exception as e:
     check("calendar_freebusy live", False, str(e)[:160])
 try:
-    res = mod.google_gmail_search("newer_than:1d", 1)
+    res = mod.google_gmail_search("newer_than:1d", 1)["items"]
     if res:
         th = mod.google_gmail_thread_get(res[0].get("threadId", ""))
         check("gmail_thread_get live", bool(th.get("messages")), f"{len(th.get('messages', []))} msgs")
@@ -352,10 +360,35 @@ try:
 except Exception as e:
     check("gmail_thread_get live", False, str(e)[:160])
 try:
-    found = mod.google_people_search("a", 3)
+    found = mod.google_people_search("a", 3)["items"]
     check("people_search live", isinstance(found, list), f"{len(found)} hits")
 except Exception as e:
     check("people_search live", False, str(e)[:160])
+
+# 4l. cursor round-trip on calendar (seeded events) + empty-page contract
+try:
+    seeds = []
+    for i in range(3):
+        st = mod.google_calendar_create(f"{PREFIX}PAGE-{stamp}-{i}", "2026-12-03T00:00:00Z", "2026-12-03T01:00:00Z")
+        seeds.append(commit_ok(f"page-seed {i} created", st)["id"])
+    p1 = mod.google_calendar_list("2026-12-03T00:00:00Z", "2026-12-04T00:00:00Z", max_results=2)
+    check("cursor page 1", len(p1["items"]) == 2 and p1["has_more"], "")
+    p2 = mod.google_calendar_list("2026-12-03T00:00:00Z", "2026-12-04T00:00:00Z",
+                                  max_results=2, page_token=p1["next_page_token"])
+    ids1 = {e["id"] for e in p1["items"]}
+    ids2 = {e["id"] for e in p2["items"]}
+    check("cursor page 2 disjoint", bool(ids2) and not (ids1 & ids2), "")
+    full = mod.google_calendar_list("2026-12-03T00:00:00Z", "2026-12-04T00:00:00Z", max_results=50)
+    check("cursor union subset", (ids1 | ids2) <= {e["id"] for e in full["items"]}, "")
+    for sid in seeds:
+        commit_ok(f"page-seed {sid[:8]} deleted", mod.google_calendar_delete(sid))
+except Exception as e:
+    check("cursor round-trip", False, str(e)[:200])
+try:
+    empty = mod.google_drive_search(f"name contains 'GW-TEST-NOPE-{stamp}'", 10)
+    check("empty page contract", empty["items"] == [] and empty["has_more"] is False, "")
+except Exception as e:
+    check("empty page contract", False, str(e)[:160])
 
 # ---------------------------------------------------------------- 5. safety semantics
 # double-commit refused
@@ -398,7 +431,49 @@ finally:
     for k in [k for k in mod._STAGED if k.startswith("cap")]:
         mod._STAGED.pop(k, None)
 
-# ---------------------------------------------------------------- 6. audit growth
+# ---------------------------------------------------------------- 6. v2.1 guardrails
+# formula tripwire (no writes)
+try:
+    mod.google_sheets_update("x", "A1:A1", [["=IMPORTXML(1,2)"]],
+                             value_input_option="USER_ENTERED")
+    check("formula tripwire blocks", False, "USER_ENTERED formula write staged (bug)")
+except Exception as e:
+    check("formula tripwire blocks", "BLOCKED" in str(e) and "allow_formulas" in str(e))
+# OVERWRITE ack gate (no writes)
+try:
+    mod.google_sheets_append("x", "A1:A1", [["v"]], insert_data_option="OVERWRITE")
+    check("overwrite ack gate", False, "OVERWRITE staged without ack (bug)")
+except Exception as e:
+    check("overwrite ack gate", "overwrite_acknowledged" in str(e))
+# thread_key + meet config + locale ride the stage path (cancelled, never committed)
+try:
+    st = mod.google_chat_send(spaces[0]["name"] if spaces else "spaces/AAAA", "probe",
+                              thread_key="thread-123_ABC")
+    check("thread_key preview", st["preview"].get("thread_key") == "thread-123_ABC", "")
+    mod.google_write_cancel(st["operation_id"])
+    try:
+        mod.google_chat_send("spaces/AAAA", "probe", thread_key="bad key!")
+        check("thread_key validation", False, "bad key staged (bug)")
+    except Exception as e2:
+        check("thread_key validation", "thread_key" in str(e2), "")
+except Exception as e:
+    check("thread_key preview", False, str(e)[:160])
+try:
+    st = mod.google_meet_create_space({"accessType": "OPEN"})
+    mod.google_write_cancel(st["operation_id"])
+    check("meet OPEN refused", False, "OPEN staged (bug)")
+except Exception as e:
+    check("meet OPEN refused", "OPEN" in str(e) or "TRUSTED" in str(e))
+try:
+    st = mod.google_sheets_create(f"{PREFIX}LOCALE-{stamp}", locale="en_US", time_zone="America/New_York")
+    ss = commit_ok("locale sheet created", st)
+    check("locale sheet verified",
+          mod.google_sheets_metadata(ss["spreadsheetId"]).get("properties", {}).get("locale") == "en_US", "")
+    commit_ok("locale sheet trashed", mod.google_drive_trash(ss["spreadsheetId"]))
+except Exception as e:
+    check("locale sheet cycle", False, str(e)[:200])
+
+# ---------------------------------------------------------------- 7. audit growth
 audit_after = audit_lines_before()
 check("audit file grew with commits", audit_before < audit_after,
       f"{audit_before} -> {audit_after}")
