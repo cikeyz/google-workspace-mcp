@@ -36,6 +36,7 @@ from pathlib import Path
 
 import httplib2
 from filelock import FileLock
+from google_auth_httplib2 import AuthorizedHttp
 from mcp.server.fastmcp import FastMCP
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -199,8 +200,11 @@ def _exec(req, kind: str = "read", timeout: int | None = None):
     attempts = 4 if kind == "read" else (2 if kind == "revalidate" else 2)
     tried_auth_refresh = False
     for attempt in range(attempts):
+        # NOTE: never pass a bare httplib2.Http here - it replaces the
+        # credentials-authorized transport and every call 401s.
+        http = AuthorizedHttp(_get_creds(), http=httplib2.Http(timeout=timeout))
         try:
-            return req.execute(http=httplib2.Http(timeout=timeout))
+            return req.execute(http=http)
         except HttpError as e:
             status = e.resp.status if e.resp is not None else 0
             if status == 401 and not tried_auth_refresh:
@@ -439,108 +443,174 @@ def google_auth_status() -> str:
 # ---------------------------------------------------------------- Sheets
 
 @mcp.tool(title='Get Spreadsheet Metadata', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_sheets_metadata(spreadsheet_id: str) -> dict:
+def google_sheets_metadata(spreadsheet_id: str, ranges: list | None = None,
+                         include_grid_data: bool = False, fields: str = "") -> dict:
     """Get a spreadsheet's full metadata: title, all sheet tabs with sheetId, index,
-    gridProperties (row/column counts), sheetType, tab color, hidden state, etc."""
+    gridProperties (row/column counts), sheetType, tab color, hidden state, etc.
+    ranges/include_grid_data/fields are passthroughs to spreadsheets.get for large sheets."""
     s = _svc("sheets", "v4")
-    return s.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    params: dict = {"spreadsheetId": spreadsheet_id}
+    if ranges:
+        params["ranges"] = ranges
+    if include_grid_data:
+        params["includeGridData"] = True
+    if fields:
+        params["fields"] = fields
+    return _exec(s.spreadsheets().get(**params), kind="read")
 
 
 @mcp.tool(title='Read Sheet Range', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_sheets_read(spreadsheet_id: str, range_: str) -> dict:
+def google_sheets_read(spreadsheet_id: str, range_: str, major_dimension: str = "ROWS",
+                     value_render_option: str = "FORMATTED_VALUE",
+                     date_time_render_option: str = "SERIAL_NUMBER") -> dict:
     """Read cells from a spreadsheet. range_ like 'Sheet1!A1:D10' or 'A1:D10'.
-    Returns the full response: range, majorDimension, and the values grid."""
+    Returns the full response: range, majorDimension, and the values grid.
+    value_render_option FORMATTED_VALUE/UNFORMATTED_VALUE/FORMULA;
+    date_time_render_option SERIAL_NUMBER/FORMATTED_STRING."""
     s = _svc("sheets", "v4")
-    return s.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=range_).execute()
+    return _exec(s.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=range_, majorDimension=major_dimension,
+        valueRenderOption=value_render_option,
+        dateTimeRenderOption=date_time_render_option), kind="read")
 
 
 @mcp.tool(title='Update Sheet Range (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
-def google_sheets_update(spreadsheet_id: str, range_: str, values: list) -> dict:
+def google_sheets_update(spreadsheet_id: str, range_: str, values: list,
+                       value_input_option: str = "USER_ENTERED",
+                       major_dimension: str = "ROWS") -> dict:
     """STAGED write: overwrite cells in a spreadsheet. values = list of rows, each a list
-    of cell values. Returns a preview (current vs new values) + operation_id; apply with
-    google_write_commit. Refuses to commit if the range changed since staging."""
+    of cell values. value_input_option USER_ENTERED parses dates/formulas/currency like
+    the UI; RAW stores literal strings. Returns a preview (current vs new values) +
+    operation_id; apply with google_write_commit. Refuses to commit if the range
+    changed since staging."""
     s = _svc("sheets", "v4")
     before = s.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_).execute().get("values", [])
 
     def apply():
-        body = {"values": values}
-        return s.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id, range=range_, valueInputOption="RAW", body=body
+        s2 = _svc("sheets", "v4")
+        body = {"values": values, "majorDimension": major_dimension}
+        return s2.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id, range=range_,
+            valueInputOption=value_input_option, body=body
         ).execute()
 
     def revalidate():
-        cur = s.spreadsheets().values().get(
+        cur = _svc("sheets", "v4").spreadsheets().values().get(
             spreadsheetId=spreadsheet_id, range=range_).execute().get("values", [])
         if cur != before:
             raise RuntimeError(
                 f"Range {range_} changed since staging; refusing to overwrite. Re-stage the update."
             )
 
-    return _stage("google_sheets_update", {"spreadsheet_id": spreadsheet_id, "range": range_, "values": values},
+    return _stage("google_sheets_update",
+                  {"spreadsheet_id": spreadsheet_id, "range": range_, "values": values,
+                   "value_input_option": value_input_option, "major_dimension": major_dimension},
                   apply, [f"range {range_} read OK, {len(before)} row(s) currently present"],
-                  {"range": range_, "before": before, "after": values}, revalidate)
+                  {"range": range_, "before": before, "after": values,
+                   "value_input_option": value_input_option}, revalidate)
 
 
 @mcp.tool(title='Append Sheet Rows (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_sheets_append(spreadsheet_id: str, range_: str, values: list) -> dict:
+def google_sheets_append(spreadsheet_id: str, range_: str, values: list,
+                       value_input_option: str = "USER_ENTERED",
+                       insert_data_option: str = "INSERT_ROWS") -> dict:
     """STAGED write: append rows to a spreadsheet. values = list of rows, each a list of cell values.
+    value_input_option USER_ENTERED parses like the UI; insert_data_option INSERT_ROWS or OVERWRITE.
     Returns a preview (rows to add + current row count) + operation_id; apply with google_write_commit."""
     s = _svc("sheets", "v4")
     current = s.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range_).execute().get("values", [])
 
     def apply():
+        s2 = _svc("sheets", "v4")
         body = {"values": values}
-        return s.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id, range=range_, valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS", body=body,
+        return s2.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id, range=range_, valueInputOption=value_input_option,
+            insertDataOption=insert_data_option, body=body,
         ).execute()
 
-    return _stage("google_sheets_append", {"spreadsheet_id": spreadsheet_id, "range": range_, "values": values},
+    return _stage("google_sheets_append",
+                  {"spreadsheet_id": spreadsheet_id, "range": range_, "values": values,
+                   "value_input_option": value_input_option, "insert_data_option": insert_data_option},
                   apply, [f"range {range_} read OK, {len(current)} row(s) present"],
-                  {"range": range_, "current_row_count": len(current), "rows_to_append": values}, None)
+                  {"range": range_, "current_row_count": len(current), "rows_to_append": values,
+                   "value_input_option": value_input_option,
+                   "insert_data_option": insert_data_option}, None)
 
 
 @mcp.tool(title='Create Spreadsheet (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_sheets_create(title: str, sheet_name: str = "Sheet1") -> dict:
+def google_sheets_create(title: str, sheet_name: str = "Sheet1", locale: str = "",
+                         time_zone: str = "", row_count: int = 0,
+                         column_count: int = 0) -> dict:
     """STAGED write: create a new spreadsheet with the given title and one tab.
-    Returns a preview + operation_id; apply with google_write_commit."""
-    s = _svc("sheets", "v4")
-
+    locale like 'en_US', time_zone like 'America/New_York'. Returns a preview +
+    operation_id; apply with google_write_commit."""
     def apply():
-        body = {"properties": {"title": title}, "sheets": [{"properties": {"title": sheet_name}}]}
+        s = _svc("sheets", "v4")
+        props: dict = {"title": title}
+        if locale:
+            props["locale"] = locale
+        if time_zone:
+            props["timeZone"] = time_zone
+        grid: dict = {"title": sheet_name}
+        if row_count > 0 or column_count > 0:
+            grid["gridProperties"] = {}
+            if row_count > 0:
+                grid["gridProperties"]["rowCount"] = row_count
+            if column_count > 0:
+                grid["gridProperties"]["columnCount"] = column_count
+        body = {"properties": props, "sheets": [{"properties": grid}]}
         return s.spreadsheets().create(body=body).execute()
 
-    return _stage("google_sheets_create", {"title": title, "sheet_name": sheet_name},
-                  apply, ["title non-empty"], {"title": title, "first_tab": sheet_name}, None)
+    return _stage("google_sheets_create",
+                  {"title": title, "sheet_name": sheet_name, "locale": locale,
+                   "time_zone": time_zone},
+                  apply, ["title non-empty"],
+                  {"title": title, "first_tab": sheet_name, "locale": locale,
+                   "time_zone": time_zone}, None)
 
 
 # ---------------------------------------------------------------- Drive
 
 @mcp.tool(title='Search Drive', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_drive_search(query: str = "", max_results: int = 10) -> list:
+def google_drive_search(query: str = "", max_results: int = 10, page_token: str = "",
+                        full: bool = False) -> dict:
     """Search Drive files. query is a Drive API query (e.g. "name contains 'NDA'"), empty = recent files.
-    Returns full file resources (id, name, mimeType, size, createdTime, modifiedTime,
-    trashed, capabilities, owners, parents, webViewLink, ...)."""
+    Returns an envelope {items, next_page_token, has_more, result_count} of file resources
+    (id, name, mimeType, size, createdTime, modifiedTime, trashed, capabilities, owners,
+    parents, webViewLink, ...). full=True returns complete File resources. Feed
+    next_page_token back as page_token."""
     d = _svc("drive", "v3")
     q = query or None
-    resp = d.files().list(
-        q=q, pageSize=min(max_results, 100),
-        fields="nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,"
-               "trashed,capabilities,owners,parents,webViewLink,iconLink,"
-               "hasThumbnail,thumbnailLink,shared,starred,viewedByMeTime)",
-        orderBy="modifiedTime desc",
-    ).execute()
-    return resp.get("files", [])
+    fields = ("nextPageToken,files(*)" if full else
+              "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,"
+              "trashed,capabilities,owners,parents,webViewLink,iconLink,"
+              "hasThumbnail,thumbnailLink,shared,starred,viewedByMeTime)")
+    resp = _exec(d.files().list(
+        q=q, pageSize=min(max_results, 1000), fields=fields,
+        orderBy="modifiedTime desc", pageToken=page_token or None,
+    ), kind="read")
+    items = resp.get("files", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Get Drive File Metadata', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_drive_get(file_id: str) -> dict:
-    """Get the FULL metadata resource for one Drive file or folder by ID
-    (size, createdTime, trashed, capabilities, owners, permissions info, etc.)."""
+def google_drive_get(file_id: str, full: bool = False) -> dict:
+    """Get the metadata resource for one Drive file or folder by ID. full=False returns the
+    decision-useful subset (identity, size, times, sharing, capabilities); full=True returns
+    the complete File resource."""
     d = _svc("drive", "v3")
-    return d.files().get(fileId=file_id, fields="*").execute()
+    if full:
+        return _exec(d.files().get(fileId=file_id, fields="*"), kind="read")
+    return _exec(d.files().get(
+        fileId=file_id,
+        fields="id,name,mimeType,size,createdTime,modifiedTime,trashed,parents,"
+               "owners(displayName,emailAddress),webViewLink,webContentLink,shared,"
+               "capabilities(canEdit,canShare,canTrash,canDownload),"
+               "permissions(type,role,emailAddress)"), kind="read")
 
 
 @mcp.tool(title='Download Drive File', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -650,23 +720,30 @@ def google_drive_share(file_id: str, email: str = "", role: str = "reader") -> d
     if role not in {"reader", "writer", "commenter"}:
         raise RuntimeError(f"Invalid role '{role}'; use reader, writer, or commenter.")
     try:
-        existing = d.permissions().list(fileId=file_id, fields="permissions(id,type,role,emailAddress)").execute()
+        existing = _svc("drive", "v3").permissions().list(
+            fileId=file_id,
+            fields="permissions(id,type,role,emailAddress,displayName,expirationTime,"
+                   "deleted,pendingOwner)").execute()
     except Exception as exc:
         raise RuntimeError(f"File {file_id} not accessible: {exc}") from exc
 
     def apply():
+        d = _svc("drive", "v3")
         body = {"role": role, "type": "anyone" if not email else "user"}
         if email:
             body["emailAddress"] = email
         return d.permissions().create(fileId=file_id, body=body, fields="*").execute()
 
     def revalidate():
-        d.files().get(fileId=file_id, fields="id").execute()  # 404 -> refuse commit
+        cur = _svc("drive", "v3").files().get(fileId=file_id, fields="id,trashed").execute()
+        if cur.get("trashed"):
+            raise RuntimeError(f"File {file_id} is trashed; refusing to share. Re-stage.")
 
     return _stage("google_drive_share", {"file_id": file_id, "email": email, "role": role},
                   apply, ["role valid", "file exists and is accessible"],
                   {"file_id": file_id, "new_permission": {"type": "anyone" if not email else "user",
                                                           "email": email, "role": role},
+                   "danger": "ANYONE-WITH-LINK access" if not email else "",
                    "current_permissions": existing.get("permissions", [])}, revalidate)
 
 
@@ -681,8 +758,10 @@ def google_drive_trash(file_id: str) -> dict:
         raise RuntimeError(f"File {file_id} ('{meta.get('name')}') is already in trash.")
 
     def apply():
-        d.files().update(fileId=file_id, body={"trashed": True}).execute()
-        return {"trashed": file_id, "name": meta.get("name")}
+        updated = _svc("drive", "v3").files().update(
+            fileId=file_id, body={"trashed": True}, fields="id,name,trashed,modifiedTime").execute()
+        return {"trashed": file_id, "name": updated.get("name"),
+                "trashed_time": updated.get("modifiedTime")}
 
     def revalidate():
         cur = d.files().get(fileId=file_id, fields="trashed").execute()
@@ -699,39 +778,60 @@ def google_drive_trash(file_id: str) -> dict:
 
 def _doc_text(document: dict) -> str:
     out = []
-    for el in document.get("body", {}).get("content", []):
-        if "paragraph" in el:
-            for run in el["paragraph"].get("elements", []):
-                tr = run.get("textRun")
-                if tr:
-                    out.append(tr.get("content", ""))
-        elif "table" in el:
-            for row in el["table"].get("tableRows", []):
-                cells = []
-                for cell in row.get("tableCells", []):
-                    txt = ""
-                    for cel in cell.get("content", []):
-                        for run in cel.get("paragraph", {}).get("elements", []):
-                            tr = run.get("textRun")
-                            if tr:
-                                txt += tr.get("content", "")
+    tabs = document.get("tabs") or [{"documentTab": {"body": document.get("body", {})}}]
+    for tab in tabs:
+        body = (tab.get("documentTab") or {}).get("body", {})
+        for el in body.get("content", []):
+            if "paragraph" in el:
+                for run in el["paragraph"].get("elements", []):
+                    tr = run.get("textRun")
+                    if tr:
+                        out.append(tr.get("content", ""))
+            elif "table" in el:
+                for row in el["table"].get("tableRows", []):
+                    cells = []
+                    for cell in row.get("tableCells", []):
+                        txt = ""
+                        for cel in cell.get("content", []):
+                            for run in cel.get("paragraph", {}).get("elements", []):
+                                tr = run.get("textRun")
+                                if tr:
+                                    txt += tr.get("content", "")
                     cells.append(txt.strip())
                 out.append(" | ".join(cells) + "\n")
+            elif "tableOfContents" in el:
+                for cel in el["tableOfContents"].get("content", []):
+                    for run in cel.get("paragraph", {}).get("elements", []):
+                        tr = run.get("textRun")
+                        if tr:
+                            out.append(tr.get("content", ""))
     return "".join(out)
 
 
 @mcp.tool(title='Read Doc', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_docs_read(document_id: str) -> dict:
-    """Read a Google Doc: title, revisionId, and the full extracted text (paragraphs + tables).
-    (The raw document JSON is enormous; this returns the readable content plus identifiers.)"""
+def google_docs_read(document_id: str, max_chars: int = 30000, full: bool = False) -> dict:
+    """Read a Google Doc: title, revisionId, and the extracted text (all tabs, paragraphs,
+    tables, TOC). Text is budgeted at max_chars with truncation flags; full=True also
+    returns the raw fetched body. (The raw document JSON is enormous; this returns the
+    readable content plus identifiers.)"""
     d = _svc("docs", "v1")
-    doc = d.documents().get(documentId=document_id).execute()
-    return {
+    # NOTE: with includeTabsContent=true the API rejects `body` in fields.
+    fields = None if full else "title,revisionId,tabs(documentTab(body(content)))"
+    doc = _exec(d.documents().get(documentId=document_id, includeTabsContent=True,
+                                  fields=fields), kind="read")
+    text = _doc_text(doc)
+    cut = len(text) > max_chars
+    out: dict = {
         "document_id": document_id,
         "title": doc.get("title"),
         "revisionId": doc.get("revisionId"),
-        "text": _doc_text(doc),
+        "text": text[:max_chars],
+        "text_truncated": cut,
+        "text_chars": len(text),
     }
+    if full:
+        out["raw"] = doc
+    return out
 
 
 @mcp.tool(title='Create Doc (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
@@ -800,17 +900,27 @@ def google_docs_append(document_id: str, text: str) -> dict:
 # ---------------------------------------------------------------- Forms
 
 @mcp.tool(title='List Forms', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_forms_list(max_results: int = 20) -> list:
-    """List Google Forms in Drive. Returns full file entries (id, name, mimeType,
-    createdTime, modifiedTime, size, webViewLink, ...)."""
+def google_forms_list(max_results: int = 20, page_token: str = "", full: bool = False) -> dict:
+    """List Google Forms in Drive. Returns an envelope {items, next_page_token, has_more,
+    result_count} of file entries (id, name, mimeType, createdTime, modifiedTime, size,
+    webViewLink, ...). full=True adds owners, sharing, and capabilities. Feed
+    next_page_token back as page_token."""
     d = _svc("drive", "v3")
-    resp = d.files().list(
+    fields = ("files(id,name,mimeType,createdTime,modifiedTime,size,webViewLink),nextPageToken"
+              if not full else
+              "files(id,name,mimeType,createdTime,modifiedTime,size,webViewLink,owners,"
+              "parents,shared,starred,capabilities,thumbnailLink),nextPageToken")
+    resp = _exec(d.files().list(
         q="mimeType='application/vnd.google-apps.form'",
-        pageSize=min(max_results, 100),
-        fields="files(id,name,mimeType,createdTime,modifiedTime,size,webViewLink)",
+        pageSize=min(max_results, 500),
+        fields=fields,
         orderBy="modifiedTime desc",
-    ).execute()
-    return resp.get("files", [])
+        pageToken=page_token or None,
+    ), kind="read")
+    items = resp.get("files", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Get Form', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -824,12 +934,24 @@ def google_forms_get(form_id: str) -> dict:
 
 
 @mcp.tool(title='Read Form Responses', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_forms_responses(form_id: str, max_results: int = 50) -> dict:
-    """Read submitted responses of a Google Form. Returns the raw API response:
-    each response with responseId, createTime, lastSubmittedTime, respondentEmail,
-    totalScore, and full answers (text and file uploads) keyed by question id."""
+def google_forms_responses(form_id: str, max_results: int = 50, page_token: str = "",
+                         filter_: str = "") -> dict:
+    """Read submitted responses of a Google Form. Returns an envelope {items,
+    next_page_token, has_more, result_count}: each response with responseId, createTime,
+    lastSubmittedTime, respondentEmail, totalScore, and full answers (text and file
+    uploads) keyed by question id. filter_ is an API timestamp filter
+    (e.g. 'timestamp > 2026-01-01T00:00:00Z'). Feed next_page_token back as page_token."""
     f = _svc("forms", "v1")
-    return f.forms().responses().list(formId=form_id, pageSize=min(max_results, 500)).execute()
+    params: dict = {"formId": form_id, "pageSize": min(max_results, 5000)}
+    if page_token:
+        params["pageToken"] = page_token
+    if filter_:
+        params["filter"] = filter_
+    resp = _exec(f.forms().responses().list(**params), kind="read")
+    items = resp.get("responses", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 # ---------------------------------------------------------------- Gmail (read)
@@ -867,45 +989,63 @@ def _gmail_attachments(payload: dict) -> list:
 
 
 @mcp.tool(title='Search Gmail', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_gmail_search(query: str = "", max_results: int = 10) -> list:
+def google_gmail_search(query: str = "", max_results: int = 10, page_token: str = "",
+                        full: bool = False) -> dict:
     """Search Gmail (read-only). query = Gmail search syntax, e.g. 'is:unread' or 'from:x newer_than:1d'.
-    Returns full metadata per message: all headers, labelIds, snippet, internalDate."""
+    Returns an envelope {items, next_page_token, has_more, result_count,
+    result_size_estimate}; each item has id, threadId, headers, labelIds, snippet, internalDate.
+    full=True adds routing headers + sizeEstimate. Feed next_page_token back as page_token."""
     g = _svc("gmail", "v1")
-    resp = g.users().messages().list(userId="me", q=query or None, maxResults=min(max_results, 50)).execute()
-    ids = [m["id"] for m in resp.get("messages", [])[:_MAX_GMAIL_FANOUT]]
+    resp = _exec(g.users().messages().list(
+        userId="me", q=query or None, maxResults=min(max_results, 500),
+        pageToken=page_token or None), kind="read")
+    ids = [m["id"] for m in resp.get("messages", [])]
+    headers = (["From", "To", "Cc", "Bcc", "Subject", "Date", "Reply-To"] if not full else
+               ["From", "To", "Cc", "Bcc", "Subject", "Date", "Reply-To",
+                "Message-ID", "In-Reply-To", "References", "List-Unsubscribe"])
     got: dict = {}
 
     def _cb(request_id, response, exception):
         got[request_id] = (response, exception)
 
-    batch = g.new_batch_http_request(callback=_cb)
-    for mid in ids:
-        batch.add(g.users().messages().get(
-            userId="me", id=mid, format="metadata",
-            metadataHeaders=["From", "To", "Cc", "Bcc", "Subject", "Date", "Reply-To"],
-            fields="id,threadId,labelIds,snippet,internalDate,payload/headers"),
-            request_id=mid)
-    _exec(batch, kind="read", timeout=_READ_TIMEOUT)
+    for i in range(0, len(ids), _MAX_GMAIL_FANOUT):
+        chunk = ids[i:i + _MAX_GMAIL_FANOUT]
+        batch = g.new_batch_http_request(callback=_cb)
+        for mid in chunk:
+            batch.add(g.users().messages().get(
+                userId="me", id=mid, format="metadata", metadataHeaders=headers,
+                fields="id,threadId,labelIds,snippet,internalDate" + (",sizeEstimate" if full else "") + ",payload/headers"),
+                request_id=mid)
+        _exec(batch, kind="read", timeout=_READ_TIMEOUT)
     out = []
     for mid in ids:
         response, exception = got.get(mid, (None, None))
         if exception is not None or response is None:
             continue
-        full = response
-        headers = {h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])}
-        out.append({"id": mid, "threadId": full.get("threadId"),
-                    "headers": headers, "labelIds": full.get("labelIds"),
-                    "snippet": full.get("snippet"), "internalDate": full.get("internalDate")})
-    return out
+        full_msg = response
+        hdrs = {h["name"]: h["value"] for h in full_msg.get("payload", {}).get("headers", [])}
+        item = {"id": mid, "threadId": full_msg.get("threadId"),
+                "headers": hdrs, "labelIds": full_msg.get("labelIds"),
+                "snippet": full_msg.get("snippet"), "internalDate": full_msg.get("internalDate")}
+        if full:
+            item["sizeEstimate"] = full_msg.get("sizeEstimate")
+        out.append(item)
+    token = resp.get("nextPageToken") or ""
+    return {"items": out, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(out),
+            "result_size_estimate": resp.get("resultSizeEstimate")}
 
 
 @mcp.tool(title='Get Gmail Message', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_gmail_get(message_id: str) -> dict:
+def google_gmail_get(message_id: str, max_body_chars: int = 8000) -> dict:
     """Read one Gmail message: ALL headers, labels, snippet, internalDate, sizeEstimate,
-    plain-text body (html fallback), and the attachment list (id, filename, mimeType, size)."""
+    plain-text body (html fallback, budgeted with truncation flags), and the attachment
+    list (id, filename, mimeType, size)."""
     g = _svc("gmail", "v1")
-    full = g.users().messages().get(userId="me", id=message_id, format="full").execute()
+    full = _exec(g.users().messages().get(userId="me", id=message_id, format="full"), kind="read")
     headers = {h["name"]: h["value"] for h in full.get("payload", {}).get("headers", [])}
+    raw_body = _gmail_body(full.get("payload", {}))
+    cut = len(raw_body) > max_body_chars
     return {
         "id": message_id,
         "threadId": full.get("threadId"),
@@ -915,34 +1055,47 @@ def google_gmail_get(message_id: str) -> dict:
         "internalDate": full.get("internalDate"),
         "sizeEstimate": full.get("sizeEstimate"),
         "attachments": _gmail_attachments(full.get("payload", {})),
-        "body": _gmail_body(full.get("payload", {})),
+        "body": raw_body[:max_body_chars],
+        "body_truncated": cut,
+        "body_chars": len(raw_body),
     }
 
 
 # ---------------------------------------------------------------- Calendar
 
 @mcp.tool(title='List Calendar Events', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_calendar_list(start: str = "", end: str = "", max_results: int = 25) -> list:
+def google_calendar_list(start: str = "", end: str = "", max_results: int = 25,
+                         page_token: str = "", q: str = "", time_zone: str = "") -> dict:
     """List calendar events. start/end = ISO 8601 (e.g. '2026-08-11T00:00:00Z'); empty start = now, empty end = +7 days.
-    Returns the FULL event resources (attendees, status, description, reminders, ...)."""
+    Returns an envelope {items, next_page_token, has_more, result_count} of FULL event
+    resources (attendees, status, description, reminders, ...). Feed next_page_token back as page_token."""
     c = _svc("calendar", "v3")
     if not start:
         start = datetime.now(timezone.utc).isoformat()
     if not end:
         end = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-    resp = c.events().list(
-        calendarId="primary", timeMin=start, timeMax=end,
-        singleEvents=True, orderBy="startTime", maxResults=min(max_results, 250),
-    ).execute()
-    return resp.get("items", [])
+    params: dict = {"calendarId": "primary", "timeMin": start, "timeMax": end,
+                    "singleEvents": True, "orderBy": "startTime",
+                    "maxResults": min(max_results, 2500)}
+    if page_token:
+        params["pageToken"] = page_token
+    if q:
+        params["q"] = q
+    if time_zone:
+        params["timeZone"] = time_zone
+    resp = _exec(c.events().list(**params), kind="read")
+    items = resp.get("items", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Get Calendar Event', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_calendar_get(event_id: str) -> dict:
     """Get one calendar event by ID. Returns the FULL event resource
-    (attendees, organizer, status, description, reminders, attachments, ...)."""
+    (attendees, organizer, status, description, reminders, attachments, conference data...)."""
     c = _svc("calendar", "v3")
-    return c.events().get(calendarId="primary", eventId=event_id).execute()
+    return _exec(c.events().get(calendarId="primary", eventId=event_id), kind="read")
 
 
 @mcp.tool(title='Create Calendar Event (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
@@ -989,49 +1142,60 @@ def google_calendar_delete(event_id: str) -> dict:
     """STAGED write: delete a calendar event by ID. Returns a preview (the event being
     deleted) + operation_id; apply with google_write_commit. Refuses to stage if the
     event does not exist, and refuses to commit if it was deleted meanwhile."""
-    c = _svc("calendar", "v3")
     try:
-        ev = c.events().get(calendarId="primary", eventId=event_id).execute()
+        ev = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
     except Exception as exc:
         raise RuntimeError(f"Event {event_id} not found or not accessible: {exc}") from exc
+    base_etag, base_updated = ev.get("etag"), ev.get("updated")
+    start = ev.get("start", {})
 
     def apply():
-        c.events().delete(calendarId="primary", eventId=event_id).execute()
+        _svc("calendar", "v3").events().delete(calendarId="primary", eventId=event_id).execute()
         return {"deleted": event_id}
 
     def revalidate():
-        c.events().get(calendarId="primary", eventId=event_id).execute()  # 404 -> refuse
+        cur = _svc("calendar", "v3").events().get(calendarId="primary", eventId=event_id).execute()
+        if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
+            raise RuntimeError("Event changed since staging; refusing to delete. Re-stage.")
 
     return _stage("google_calendar_delete", {"event_id": event_id},
                   apply, ["event exists"],
                   {"event_id": event_id, "summary": ev.get("summary"),
-                   "start": ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date"),
+                   "start": start.get("dateTime") or start.get("date"),
+                   "end": (ev.get("end") or {}).get("dateTime"),
+                   "attendees": [a.get("emailAddress", a.get("email", "")) for a in ev.get("attendees", [])],
                    "status": ev.get("status")}, revalidate)
 
 
 # ---------------------------------------------------------------- People
 
 @mcp.tool(title='List Contacts', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_people_contacts(max_results: int = 100) -> list:
-    """List the user's Google contacts. Returns the RAW person resources with all
-    requested fields: names, emails, phones, organizations, addresses, birthdays,
-    memberships, urls, biographies, user-defined fields, and metadata."""
+def google_people_contacts(max_results: int = 50, page_token: str = "",
+                         full: bool = False) -> dict:
+    """List the user's Google contacts. Returns an envelope {items, next_page_token,
+    has_more, result_count, total_items} of person resources. Default fields cover names,
+    emails, phones, and organizations; full=True restores addresses, birthdays,
+    memberships, urls, biographies, user-defined fields, and metadata. Feed
+    next_page_token back as page_token."""
     p = _svc("people", "v1")
-    resp = p.people().connections().list(
+    fields = ("names,emailAddresses,phoneNumbers,organizations" if not full else
+              "names,emailAddresses,phoneNumbers,organizations,addresses,"
+              "birthdays,memberships,urls,userDefined,biographies,metadata")
+    resp = _exec(p.people().connections().list(
         resourceName="people/me",
         pageSize=min(max_results, 1000),
-        personFields="names,emailAddresses,phoneNumbers,organizations,addresses,"
-                     "birthdays,memberships,urls,userDefined,biographies,metadata",
-    ).execute()
-    return resp.get("connections", [])
+        personFields=fields,
+        pageToken=page_token or None,
+    ), kind="read")
+    items = resp.get("connections", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items), "total_items": resp.get("totalItems")}
 
 
 # ---------------------------------------------------------------- Slides
 
-def _slide_text(page_element: dict) -> str:
-    shape = page_element.get("shape")
-    if not shape:
-        return ""
+def _shape_runs_text(shape: dict) -> str:
     return " ".join(
         te.get("textRun", {}).get("content", "").strip()
         for te in shape.get("text", {}).get("textElements", [])
@@ -1039,13 +1203,40 @@ def _slide_text(page_element: dict) -> str:
     )
 
 
+def _slide_text(page_element: dict) -> str:
+    if "shape" in page_element:
+        return _shape_runs_text(page_element["shape"])
+    if "table" in page_element:
+        cells = []
+        for row in page_element["table"].get("tableRows", []):
+            for cell in row.get("tableCells", []):
+                for cel in cell.get("content", []):
+                    for run in cel.get("paragraph", {}).get("elements", []):
+                        tr = run.get("textRun")
+                        if tr and tr.get("content", "").strip():
+                            cells.append(tr["content"].strip())
+        return " | ".join(cells)
+    if "wordArt" in page_element:
+        return page_element["wordArt"].get("renderedText", "")
+    if "group" in page_element:
+        return " ".join(filter(None, (_slide_text(c) for c in
+                                      page_element["group"].get("children", []))))
+    return ""
+
+
 @mcp.tool(title='Get Presentation', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_slides_get(presentation_id: str) -> dict:
-    """Read a Google Slides presentation: title, slide count, and per-slide detail —
-    layout, extracted text, speaker notes, and element inventory (objectId + type)."""
+def google_slides_get(presentation_id: str, full: bool = False, max_text_chars: int = 20000) -> dict:
+    """Read a Google Slides presentation: title, revision, slide count, and per-slide detail —
+    layout, extracted text (shapes, tables, word art, groups), speaker notes, and element
+    inventory (objectId + type + size). Text is budgeted with truncation flags;
+    full=True returns the raw fetched slides as well."""
     s = _svc("slides", "v1")
-    pres = s.presentations().get(presentationId=presentation_id).execute()
+    fields = None if full else (
+        "title,presentationId,revisionId,locale,pageSize,"
+        "slides(objectId,slideProperties(layoutObjectId,notesPage(pageElements)),pageElements)")
+    pres = _exec(s.presentations().get(presentationId=presentation_id, fields=fields), kind="read")
     slides = []
+    total = 0
     for sl in pres.get("slides", []):
         elements = []
         texts = []
@@ -1053,7 +1244,14 @@ def google_slides_get(presentation_id: str) -> dict:
             kind = "shape" if "shape" in el else next(iter(k for k in
                    ("image", "line", "video", "table", "group", "wordArt", "sheetsChart", "placeholder")
                    if k in el), "unknown")
-            elements.append({"objectId": el.get("objectId"), "type": kind})
+            entry: dict = {"objectId": el.get("objectId"), "type": kind}
+            if isinstance(el.get("size"), dict):
+                entry["size"] = el["size"]
+            if isinstance(el.get("title"), str):
+                entry["title"] = el["title"]
+            if isinstance(el.get("description"), str):
+                entry["description"] = el["description"][:300]
+            elements.append(entry)
             txt = _slide_text(el)
             if txt:
                 texts.append(txt)
@@ -1062,14 +1260,22 @@ def google_slides_get(presentation_id: str) -> dict:
             txt = _slide_text(el)
             if txt:
                 notes.append(txt)
+        text = " ".join(texts)
+        total += len(text)
         slides.append({
             "id": sl.get("objectId"),
             "layout": sl.get("slideProperties", {}).get("layoutObjectId"),
-            "text": " ".join(texts),
+            "text": text[:max_text_chars],
+            "text_truncated": len(text) > max_text_chars,
             "notes": " ".join(notes),
             "elements": elements,
         })
-    return {"title": pres.get("title"), "slide_count": len(slides), "slides": slides}
+    out: dict = {"presentation_id": presentation_id, "title": pres.get("title"),
+                 "revision_id": pres.get("revisionId"), "slide_count": len(slides),
+                 "slides": slides, "text_chars": total}
+    if full:
+        out["raw_slides"] = pres.get("slides", [])
+    return out
 
 
 @mcp.tool(title='Create Slides (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
@@ -1093,21 +1299,46 @@ def google_slides_create(title: str) -> dict:
 # ---------------------------------------------------------------- Tasks
 
 @mcp.tool(title='List Task Lists', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_tasks_lists() -> list:
-    """List the user's task lists. Returns full task list resources (id, title, updated, ...)."""
+def google_tasks_lists(page_token: str = "") -> dict:
+    """List the user's task lists. Returns an envelope {items, next_page_token, has_more,
+    result_count} of full task list resources (id, title, updated, ...). Feed
+    next_page_token back as page_token."""
     t = _svc("tasks", "v1")
-    resp = t.tasklists().list(maxResults=100).execute()
-    return resp.get("items", [])
+    resp = _exec(t.tasklists().list(maxResults=100, pageToken=page_token or None), kind="read")
+    items = resp.get("items", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='List Tasks', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_tasks_list(tasklist_id: str, max_results: int = 50) -> list:
+def google_tasks_list(tasklist_id: str, max_results: int = 50, page_token: str = "",
+                      show_completed: bool | None = None, show_deleted: bool | None = None,
+                      show_hidden: bool | None = None, due_min: str = "", due_max: str = "") -> dict:
     """List tasks in a task list. tasklist_id = '@default' for the default list.
-    Returns full task resources (id, title, status, due, notes, completed, deleted,
-    hidden, position, updated, links, ...)."""
+    Returns an envelope {items, next_page_token, has_more, result_count} of full task
+    resources (id, title, status, due, notes, completed, deleted, hidden, position,
+    updated, links, ...). Filter flags default to API behavior when unset. Feed
+    next_page_token back as page_token."""
     t = _svc("tasks", "v1")
-    resp = t.tasks().list(tasklist=tasklist_id, maxResults=min(max_results, 100)).execute()
-    return resp.get("items", [])
+    params: dict = {"tasklist": tasklist_id, "maxResults": min(max_results, 100)}
+    if page_token:
+        params["pageToken"] = page_token
+    if show_completed is not None:
+        params["showCompleted"] = show_completed
+    if show_deleted is not None:
+        params["showDeleted"] = show_deleted
+    if show_hidden is not None:
+        params["showHidden"] = show_hidden
+    if due_min:
+        params["dueMin"] = due_min
+    if due_max:
+        params["dueMax"] = due_max
+    resp = _exec(t.tasks().list(**params), kind="read")
+    items = resp.get("items", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Create Task (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
@@ -1179,46 +1410,63 @@ def google_tasks_delete(tasklist_id: str, task_id: str) -> dict:
     exist, and refuses to commit if it was deleted meanwhile."""
     t = _svc("tasks", "v1")
     try:
-        tk = t.tasks().get(tasklist=tasklist_id, task=task_id).execute()
+        tk = _svc("tasks", "v1").tasks().get(tasklist=tasklist_id, task=task_id).execute()
     except Exception as exc:
         raise RuntimeError(f"Task {task_id} not found: {exc}") from exc
+    base_etag, base_updated = tk.get("etag"), tk.get("updated")
 
     def apply():
-        t.tasks().delete(tasklist=tasklist_id, task=task_id).execute()
+        _svc("tasks", "v1").tasks().delete(tasklist=tasklist_id, task=task_id).execute()
         return {"deleted": task_id}
 
     def revalidate():
-        t.tasks().get(tasklist=tasklist_id, task=task_id).execute()  # 404 -> refuse
+        cur = _svc("tasks", "v1").tasks().get(tasklist=tasklist_id, task=task_id).execute()
+        if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
+            raise RuntimeError("Task changed since staging; refusing to delete. Re-stage.")
 
     return _stage("google_tasks_delete", {"tasklist_id": tasklist_id, "task_id": task_id},
                   apply, ["task exists"],
-                  {"task_id": task_id, "title": tk.get("title"), "status": tk.get("status")},
+                  {"task_id": task_id, "title": tk.get("title"), "status": tk.get("status"),
+                   "notes": (tk.get("notes") or "")[:300], "due": tk.get("due")},
                   revalidate)
 
 
 # ---------------------------------------------------------------- Chat
 
 @mcp.tool(title='List Chat Spaces', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_chat_spaces(max_results: int = 20) -> list:
-    """List Google Chat spaces the user belongs to. Returns full space resources
-    (name, displayName, spaceType, spaceThreadingState, adminInstalled, ...)."""
+def google_chat_spaces(max_results: int = 50, page_token: str = "") -> dict:
+    """List Google Chat spaces the user belongs to. Returns an envelope {items,
+    next_page_token, has_more, result_count} of full space resources
+    (name, displayName, spaceType, spaceThreadingState, adminInstalled, ...). Feed
+    next_page_token back as page_token."""
     ch = _svc("chat", "v1")
-    resp = ch.spaces().list(pageSize=min(max_results, 100)).execute()
-    return resp.get("spaces", [])
+    resp = _exec(ch.spaces().list(pageSize=min(max_results, 1000),
+                                  pageToken=page_token or None), kind="read")
+    items = resp.get("spaces", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='List Chat Messages', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_chat_messages(space_name: str, max_results: int = 20) -> list:
+def google_chat_messages(space_name: str, max_results: int = 50, page_token: str = "") -> dict:
     """List recent messages in a Chat space. space_name like 'spaces/AAAA...'.
-    Returns full message resources (text, formattedText, sender, createTime, thread, attachment, ...)."""
+    Returns an envelope {items, next_page_token, has_more, result_count} of full message
+    resources (text, formattedText, sender, createTime, thread, attachment, ...). Feed
+    next_page_token back as page_token."""
     ch = _svc("chat", "v1")
-    resp = ch.spaces().messages().list(parent=space_name, pageSize=min(max_results, 100)).execute()
-    return resp.get("messages", [])
+    resp = _exec(ch.spaces().messages().list(parent=space_name, pageSize=min(max_results, 1000),
+                                             pageToken=page_token or None), kind="read")
+    items = resp.get("messages", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Send Chat Message (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_chat_send(space_name: str, text: str) -> dict:
+def google_chat_send(space_name: str, text: str, thread_key: str = "") -> dict:
     """STAGED write: send a message to a Chat space the user is in. space_name like 'spaces/AAAA...'.
+    thread_key replies inside an existing thread instead of starting a new one.
     Returns a preview (space + exact message text) + operation_id; apply with google_write_commit."""
     if not text.strip():
         raise RuntimeError("Message text must be non-empty.")
@@ -1229,36 +1477,42 @@ def google_chat_send(space_name: str, text: str) -> dict:
 
     def apply():
         ch = _svc("chat", "v1")
+        body: dict = {"text": text}
+        if thread_key:
+            body["thread"] = {"threadKey": thread_key}
         return ch.spaces().messages().create(
             parent=space_name,
-            body={"text": text},
+            body=body,
             messageId=f"client-{secrets.token_hex(8)}").execute()
 
     def revalidate():
         _svc("chat", "v1").spaces().get(name=space_name).execute()  # 404 -> refuse
 
-    return _stage("google_chat_send", {"space_name": space_name, "text": text},
+    return _stage("google_chat_send", {"space_name": space_name, "text": text,
+                                       "thread_key": thread_key},
                   apply,
                   ["text non-empty", f"space exists ({space.get('displayName', space_name)})"],
                   {"space_name": space_name, "space_display": space.get("displayName", ""),
-                   "text": text, "text_chars": len(text)}, revalidate)
+                   "thread_key": thread_key, "text": text, "text_chars": len(text)}, revalidate)
 
 
 # ---------------------------------------------------------------- Meet
 
 @mcp.tool(title='Create Meet Space (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_meet_create_space() -> dict:
+def google_meet_create_space(config: dict | None = None) -> dict:
     """STAGED write: create a new Google Meet video conference space.
+    config is an optional Meet space config (e.g. {"accessType": "OPEN"}).
     Returns a preview + operation_id; apply with google_write_commit."""
     mt = _svc("meet", "v2")
 
     def apply():
-        return mt.spaces().create(body={}).execute()
+        return mt.spaces().create(body={"config": config} if config else {}).execute()
 
-    return _stage("google_meet_create_space", {},
+    return _stage("google_meet_create_space", {"config": config or {}},
                   apply,
                   ["no args"],
-                  {"note": "Creates a brand-new Meet space (a real meeting link)."}, None)
+                  {"note": "Creates a brand-new Meet space (a real meeting link).",
+                   "config": config or {}}, None)
 
 
 @mcp.tool(title='Get Meet Space', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -1354,12 +1608,17 @@ def google_drive_permissions(file_id: str) -> dict:
 
 
 @mcp.tool(title='List Chat Members', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
-def google_chat_members(space_name: str, max_results: int = 50) -> list:
+def google_chat_members(space_name: str, max_results: int = 50, page_token: str = "") -> dict:
     """List members of a Chat space (who is in the room before posting).
-    Returns membership resources (member name/type, roles)."""
+    Returns an envelope {items, next_page_token, has_more, result_count} of membership
+    resources (member name/type, roles). Feed next_page_token back as page_token."""
     ch = _svc("chat", "v1")
-    resp = ch.spaces().members().list(parent=space_name, pageSize=min(max_results, 100)).execute()
-    return resp.get("memberships", [])
+    resp = _exec(ch.spaces().members().list(parent=space_name, pageSize=min(max_results, 1000),
+                                            pageToken=page_token or None), kind="read")
+    items = resp.get("memberships", [])
+    token = resp.get("nextPageToken") or ""
+    return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "result_count": len(items)}
 
 
 @mcp.tool(title='Query Free/Busy', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))

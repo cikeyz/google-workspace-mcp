@@ -2,9 +2,9 @@
 r"""Verification battery for the personal google-workspace MCP server.
 
 Run with the server's own venv python from PowerShell (canonical home):
-    $env:HERMES_HOME = "C:\Users\you\AppData\Local\hermes"  # state home until Phase 2
-    C:\Users\you\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
-      C:\Users\you\.agents\mcps\google-workspace\setup\tests\verify_server.py
+    $env:HERMES_HOME = "C:\Users\YOU\AppData\Local\hermes"  # state home until Phase 2
+    C:\Users\YOU\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
+      C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\verify_server.py
 
 Checks:
 1. server.py imports cleanly and registers all expected tools (update EXPECTED when adding tools)
