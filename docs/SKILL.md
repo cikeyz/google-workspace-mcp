@@ -31,20 +31,20 @@ The Hermes profile runs a Google Workspace MCP server (`google-workspace`) authe
 - Scope source of truth: canonical `setup/setup.py` SCOPES list (also the auth tool: `--auth-url` / `--auth-code` / `--check`)
 - Tests: canonical `setup/tests/verify_server.py` (quick) + `test_server.py` (full E2E) — run with `HERMES_HOME` set to the state home
 
-## Service matrix (11 services, 41 tools — live-recounted 2026-09-06)
+## Service matrix (11 services, 54 tools — v2.0)
 
 | Service | API to enable (console) | Scope | Tools |
 |---|---|---|---|
-| sheets v4 | Sheets API | spreadsheets | metadata, read, update, append, create |
-| drive v3 | Drive API | drive | search, get, download, upload, create_folder, share |
+| sheets v4 | Sheets API | spreadsheets | metadata, read, update, append, create, conditional_formats |
+| drive v3 | Drive API | drive | search, get, download, upload, create_folder, share, trash, permissions, copy, update |
 | docs v1 | Docs API | documents | read, create, append |
 | forms v1 | Forms API | forms.body, forms.responses.readonly | list, get, responses |
-| gmail v1 | Gmail API | gmail.readonly, gmail.send, gmail.modify | search, get |
-| calendar v3 | Calendar API | calendar | list, get, create, delete |
-| people v1 | People API | contacts.readonly | contacts |
+| gmail v1 | Gmail API | gmail.readonly, gmail.send, gmail.modify | search, get, thread_get, attachment_download, send |
+| calendar v3 | Calendar API | calendar | list, get, create, delete, patch, freebusy |
+| people v1 | People API | contacts.readonly | contacts, search, get |
 | slides v1 | Slides API | presentations | get, create |
-| tasks v1 | Tasks API | tasks | lists, list, create, update |
-| chat v1 | Chat API | chat.messages, chat.spaces.readonly, chat.memberships.readonly | spaces, messages, send |
+| tasks v1 | Tasks API | tasks | lists, list, get, create, update, delete |
+| chat v1 | Chat API | chat.messages, chat.spaces.readonly, chat.memberships.readonly | spaces, messages, send, members |
 | meet v2 | Meet API | meetings.space.created, meetings.space.readonly | create_space, get_space |
 
 Console enable link pattern: `https://console.cloud.google.com/apis/api/<api>.googleapis.com/overview?project=example-gcp-project` — Calendar uses `calendar-json.googleapis.com`. Full inventory + enablement state: `references/server-inventory.md` (company-era filename, contents still valid).

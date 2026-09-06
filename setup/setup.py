@@ -69,7 +69,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/meetings.space.readonly",
 ]
 
-# Exact pins: keep in sync with requirements.txt at the repo root.
+# Exact pins: keep in sync with pyproject.toml [project.optional-dependencies].google
+# and tools/lazy_deps.py LAZY_DEPS['skill.google_workspace'].
 # Pinning all protects against version drift and ensures the security floors
 # (httplib2 GHSA-j5g9-f88f-gfj3, stale pyasn1/google-auth) are honoured
 # regardless of install path.
@@ -324,20 +325,27 @@ def store_client_secret(path: str):
 
 def _save_pending_auth(*, state: str, code_verifier: str):
     """Persist the OAuth session bits needed for a later token exchange."""
+    import time as _time
     PENDING_AUTH_PATH.write_text(
         json.dumps(
             {
                 "state": state,
                 "code_verifier": code_verifier,
                 "redirect_uri": REDIRECT_URI,
+                "created_at": _time.time(),
             },
             indent=2,
         ), encoding="utf-8"
     )
+    try:
+        os.chmod(PENDING_AUTH_PATH, 0o600)
+    except Exception:
+        pass
 
 
 def _load_pending_auth() -> dict:
     """Load the pending OAuth session created by get_auth_url()."""
+    import time as _time
     if not PENDING_AUTH_PATH.exists():
         print("ERROR: No pending OAuth session found. Run --auth-url first.")
         sys.exit(1)
@@ -352,6 +360,11 @@ def _load_pending_auth() -> dict:
     if not data.get("state") or not data.get("code_verifier"):
         print("ERROR: Pending OAuth session is missing PKCE data.")
         print("Run --auth-url again to start a fresh OAuth session.")
+        sys.exit(1)
+
+    if _time.time() - float(data.get("created_at", 0)) > 600:
+        PENDING_AUTH_PATH.unlink(missing_ok=True)
+        print("ERROR: Pending OAuth session expired (>10 min). Run --auth-url again.")
         sys.exit(1)
 
     return data
@@ -436,6 +449,7 @@ def exchange_auth_code(code: str):
         os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
         flow.fetch_token(code=code)
     except Exception as e:
+        PENDING_AUTH_PATH.unlink(missing_ok=True)
         print(f"ERROR: Token exchange failed: {e}")
         print("The code may have expired. Run --auth-url to get a fresh URL.")
         sys.exit(1)
@@ -459,13 +473,31 @@ def exchange_auth_code(code: str):
         print("Some services may not be available.")
 
     TOKEN_PATH.write_text(json.dumps(token_payload, indent=2), encoding="utf-8")
+    try:
+        os.chmod(TOKEN_PATH, 0o600)
+    except Exception:
+        pass
     PENDING_AUTH_PATH.unlink(missing_ok=True)
     print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
     print(f"Profile-scoped token location: {display_hermes_home()}/google_token.json")
 
 
+def _post_revoke(tok: str) -> None:
+    import urllib.parse
+    import urllib.request
+    urllib.request.urlopen(
+        urllib.request.Request(
+            "https://oauth2.googleapis.com/revoke",
+            data=urllib.parse.urlencode({"token": tok}).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        ),
+        timeout=15,
+    )
+
+
 def revoke():
-    """Revoke stored token and delete it."""
+    """Revoke stored token (refresh + access) and delete local auth files."""
     if not TOKEN_PATH.exists():
         print("No token to revoke.")
         return
@@ -478,22 +510,22 @@ def revoke():
         creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-
-        import urllib.request
-        urllib.request.urlopen(
-            urllib.request.Request(
-                f"https://oauth2.googleapis.com/revoke?token={creds.token}",
-                method="POST",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            ),
-            timeout=15,
-        )
-        print("Token revoked with Google.")
+        for tok in (creds.refresh_token, creds.token):
+            if not tok:
+                continue
+            try:
+                _post_revoke(tok)
+            except Exception:
+                pass
+        print("Token revoked with Google (refresh + access).")
     except Exception as e:
         print(f"Remote revocation failed (token may already be invalid): {e}")
 
     TOKEN_PATH.unlink(missing_ok=True)
     PENDING_AUTH_PATH.unlink(missing_ok=True)
+    Path(str(TOKEN_PATH) + ".lock").unlink(missing_ok=True)
+    for tmp in TOKEN_PATH.parent.glob("google_token*.tmp.*"):
+        tmp.unlink(missing_ok=True)
     print(f"Deleted {TOKEN_PATH}")
 
 
@@ -504,7 +536,11 @@ def main():
     group.add_argument("--check-live", action="store_true", help="Check auth with a real API call (detects disabled_client)")
     group.add_argument("--client-secret", metavar="PATH", help="Store OAuth client_secret.json")
     group.add_argument("--auth-url", action="store_true", help="Print OAuth URL for user to visit")
-    group.add_argument("--auth-code", metavar="CODE", help="Exchange auth code for token")
+    group.add_argument("--auth-code", metavar="CODE",
+                       help="Exchange auth code for token ('-' reads from stdin; "
+                            "prefer stdin or --auth-code-file over argv, which leaks to history)")
+    group.add_argument("--auth-code-file", metavar="PATH",
+                       help="Read the auth code/URL from a file instead of argv")
     group.add_argument("--revoke", action="store_true", help="Revoke and delete stored token")
     group.add_argument("--install-deps", action="store_true", help="Install Python dependencies")
     args = parser.parse_args()
@@ -517,8 +553,20 @@ def main():
         store_client_secret(args.client_secret)
     elif args.auth_url:
         get_auth_url()
-    elif args.auth_code:
-        exchange_auth_code(args.auth_code)
+    elif args.auth_code or args.auth_code_file:
+        if args.auth_code_file:
+            code = Path(args.auth_code_file).read_text(encoding="utf-8").strip()
+        elif args.auth_code == "-":
+            code = sys.stdin.readline().strip()
+        else:
+            code = args.auth_code
+        try:
+            exchange_auth_code(code)
+        finally:
+            code = ""
+            args.auth_code = ""
+            if args.auth_code_file:
+                args.auth_code_file = ""
     elif args.revoke:
         revoke()
     elif args.install_deps:

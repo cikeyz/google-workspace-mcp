@@ -19,9 +19,8 @@ from pathlib import Path
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-HOME = Path(os.environ.get("GOOGLE_WORKSPACE_HOME",
-                           os.environ.get("HERMES_HOME", Path.home() / ".google-workspace-mcp")))
-TOKEN = str(HOME / "google_token.json")  # HOME honors GOOGLE_WORKSPACE_HOME first  # HOME honors GOOGLE_WORKSPACE_HOME first
+HOME = Path(os.environ.get("HERMES_HOME", Path.home() / "AppData/Local/hermes"))
+TOKEN = str(HOME / "google_token.json")
 
 
 def main(spreadsheet_id: str) -> None:

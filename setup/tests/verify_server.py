@@ -2,9 +2,9 @@
 r"""Verification battery for the personal google-workspace MCP server.
 
 Run with the server's own venv python from PowerShell (canonical home):
-    $env:GOOGLE_WORKSPACE_HOME = "C:\Users\YOU\.google-workspace-mcp"  # state home until Phase 2
-    C:\Users\YOU\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
-      C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\verify_server.py
+    $env:HERMES_HOME = "C:\Users\you\AppData\Local\hermes"  # state home until Phase 2
+    C:\Users\you\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
+      C:\Users\you\.agents\mcps\google-workspace\setup\tests\verify_server.py
 
 Checks:
 1. server.py imports cleanly and registers all expected tools (update EXPECTED when adding tools)
@@ -59,9 +59,17 @@ expected = {
     "google_tasks_update", "google_tasks_delete",
     "google_chat_spaces", "google_chat_messages", "google_chat_send",
     "google_meet_create_space", "google_meet_get_space",
+    "google_gmail_thread_get", "google_gmail_attachment_download",
+    "google_people_search", "google_people_get", "google_tasks_get",
+    "google_drive_permissions", "google_chat_members", "google_calendar_freebusy",
+    "google_sheets_conditional_formats",
+    "google_gmail_send", "google_calendar_patch",
+    "google_drive_copy", "google_drive_update",
 }
 missing = expected - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")
+unexpected = tool_names - expected
+check("no unlisted tools", not unexpected, f"unexpected={sorted(unexpected)}")
 
 # 2+3. live calls with already-granted scopes
 try:

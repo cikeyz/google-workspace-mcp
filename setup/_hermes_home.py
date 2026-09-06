@@ -28,8 +28,8 @@ except (ModuleNotFoundError, ImportError):
         """Return the Workspace state home directory.
 
         Neutral-first order: ``GOOGLE_WORKSPACE_HOME``, then legacy
-        ``HERMES_HOME`` (kept so old harness configs keep working), then
-        ``~/.google-workspace-mcp``. Set GOOGLE_WORKSPACE_HOME always."""
+        ``HERMES_HOME`` (kept so old harness configs keep working), then the
+        Hermes default. Canonical home sets GOOGLE_WORKSPACE_HOME always."""
         for var in ("GOOGLE_WORKSPACE_HOME", "HERMES_HOME"):
             val = os.environ.get(var, "").strip()
             if val:
@@ -39,7 +39,7 @@ except (ModuleNotFoundError, ImportError):
 
             return _ghh()
         except (ModuleNotFoundError, ImportError):
-            return Path.home() / ".google-workspace-mcp"
+            return Path.home() / ".hermes"
 
     def display_hermes_home() -> str:
         """Return a user-friendly ``~/``-shortened display string.
