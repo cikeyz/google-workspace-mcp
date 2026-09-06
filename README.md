@@ -1,7 +1,7 @@
 <h1 align="center">Google Workspace MCP</h1>
 
 <p align="center">
-  <img src="./assets/google-workspace.svg" width="480" alt="Google Workspace">
+  <img src="https://upload.wikimedia.org/wikipedia/commons/5/5f/Google_Workspace_Logo.svg" width="480" alt="Google Workspace">
   <br />
   <strong>Full-context Google Workspace tools for MCP clients, with staged writes.</strong>
 </p>
