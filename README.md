@@ -7,7 +7,7 @@
 <p align="center">
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white">
   <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.1.0-blue.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.1.0-blue.svg?logo=git&logoColor=white">
 </p>
 
 <p align="center">
