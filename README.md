@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.1.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.2.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -87,7 +87,7 @@ flowchart LR
 
 ### Requirements
 
-- Python 3.11
+- Python 3.11+ (developed and CI-tested on 3.14; `.python-version` pins 3.14)
 - A Google Cloud project with the 11 Workspace APIs enabled and a Desktop
   OAuth client (see `docs/SKILL.md` for the click path)
 - An MCP client that can launch stdio
@@ -119,7 +119,7 @@ Expect `RESULT: ALL CHECKS PASSED`.
 ```bash
 git clone https://github.com/cikeyz/google-workspace-mcp.git
 cd google-workspace-mcp
-python3.11 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 export GOOGLE_WORKSPACE_HOME="$PWD/state"

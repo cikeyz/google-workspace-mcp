@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.2.0 (2026-09-06) — Python 3.14 baseline
+
+Non-breaking. Documented and CI-tested baseline moves from 3.11 to 3.14
+(floor stays 3.11+, no ceiling). Zero runtime code changes: the codebase
+already used `X | Y` syntax, `datetime.now(timezone.utc)`, and no asyncio
+or removed stdlib. Verified with stdio `initialize` + `tools/list` smoke
+on 3.14.7 and `py_compile` on 3.11.15.
+
+- Deps re-pinned and tested on 3.14: `mcp` 1.26.0 to 1.29.1 (first v1 line
+  with declared 3.14 support), `google-api-python-client` to 2.200.0,
+  `google-auth` to 2.57.1, `google-auth-oauthlib` to 1.4.1,
+  `google-auth-httplib2` to 0.4.2, `filelock` 3.16.1 to 3.32.5.
+  `httplib2`/`pyasn1` unchanged (current). All pure-Python, no 3.14 blocks.
+- CI now runs the hygiene battery on a `[3.11, 3.14]` matrix (floor + head).
+- New `.python-version` pins 3.14 for contributors and `uv`/`pyenv`.
+- Rollback: re-pin to the v2.1 requirements and delete `.python-version`.
+
 ## v2.1.0 (2026-09-06) — BREAKING list envelopes
 
 All 10 list tools return `{items, next_page_token, has_more, result_count}` instead of
