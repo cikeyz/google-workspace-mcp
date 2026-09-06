@@ -31,7 +31,7 @@ The Hermes profile runs a Google Workspace MCP server (`google-workspace`) authe
 - Scope source of truth: canonical `setup/setup.py` SCOPES list (also the auth tool: `--auth-url` / `--auth-code` / `--check`)
 - Tests: canonical `setup/tests/verify_server.py` (quick) + `test_server.py` (full E2E) — run with `HERMES_HOME` set to the state home
 
-## Service matrix (11 services, 54 tools — v2.0 2026-09-06)
+## Service matrix (11 services, 54 tools - v2.1 envelopes, see MIGRATION-v2.md)
 
 | Service | API to enable (console) | Scope | Tools |
 |---|---|---|---|
