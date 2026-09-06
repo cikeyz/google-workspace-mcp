@@ -17,6 +17,8 @@ jobs:
       - name: No trailing whitespace
         run: git diff --check
       - name: No secret patterns
+        # NOTE: this workflow file itself contains the patterns below, so it
+        # must stay excluded or the gate trips on its own definition.
         run: >
           ! grep -rEn "GOCSPX-|AIza[0-9A-Za-z_-]{10,}|ya29\.|4/0[A-Za-z0-9_-]{10,}|xox[bap]-" .
-          --exclude-dir=.git --exclude-dir=__pycache__
+          --exclude-dir=.git --exclude-dir=__pycache__ --exclude=ci.yml
