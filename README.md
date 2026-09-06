@@ -5,9 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/cikeyz/google-workspace-mcp/blob/master/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white">
-  <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
+  <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg?logo=google&logoColor=white">
 </p>
 
 <p align="center">
