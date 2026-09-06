@@ -1,5 +1,3 @@
-<h1 align="center">Google Workspace MCP</h1>
-
 <p align="center">
   <img src="https://upload.wikimedia.org/wikipedia/commons/5/5f/Google_Workspace_Logo.svg" width="480" alt="Google Workspace">
   <br />
@@ -13,10 +11,10 @@
 </p>
 
 <p align="center">
-[Why this server](#why-this-server) | [Quick start](#quick-start) |
-[Tools](#tools) | [Configuration](#configuration) |
-[Security](#transport-and-security) | [Development](#development) |
-[Contributing](#contributing)
+<a href="#why-this-server">Why this server</a> | <a href="#quick-start">Quick start</a> |
+<a href="#tools">Tools</a> | <a href="#configuration">Configuration</a> |
+<a href="#transport-and-security">Security</a> | <a href="#development">Development</a> |
+<a href="#contributing">Contributing</a>
 </p>
 
 > [!NOTE]
