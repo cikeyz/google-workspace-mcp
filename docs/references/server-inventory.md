@@ -51,5 +51,5 @@ All read tools now return FULL API payloads (question types/required/validation/
 ## Useful Drive artifacts found in the account (2026-08-11)
 
 - "EXAMPLECO BATCH 6 FORM" — id `YOUR_FORM_ID` (public title: "EXAMPLECO BATCH 6 INTERNS"); responses land in "Form Certicode Batch 6 Intern_Master_List" (tabs `Batch 6`, `Dropdown Lists`).
-- "ExampleCo Hiring Guide" doc (id `YOUR_DOC_ID`) — hiring SOP + templates; acceptance email links `forms.gle/xSG6zxZZtTbCYJbNA` onboarding form.
+- "ExampleCo Hiring Guide" doc (id `YOUR_DOC_ID`) — hiring SOP + templates; acceptance email links `forms.gle/<your-form-id>` onboarding form.
 - NDA PDFs and DTR templates for interns live in Drive (folder parents visible via `google_drive_search`).
