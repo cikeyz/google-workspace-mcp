@@ -12,10 +12,12 @@
   <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
 </p>
 
+<p align="center">
 [Why this server](#why-this-server) | [Quick start](#quick-start) |
 [Tools](#tools) | [Configuration](#configuration) |
 [Security](#transport-and-security) | [Development](#development) |
 [Contributing](#contributing)
+</p>
 
 > [!NOTE]
 > v2.1 changed all list tools from bare arrays to cursor envelopes
