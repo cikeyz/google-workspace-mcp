@@ -74,20 +74,20 @@ check("no unlisted tools", not unexpected, f"unexpected={sorted(unexpected)}")
 # 2+3. live calls with already-granted scopes
 try:
     res = mod.google_calendar_list(max_results=3)
-    check("calendar list live", isinstance(res, list), f"{len(res)} events")
+    check("calendar list live", isinstance(res.get("items"), list), f"{res.get('result_count', 0)} events")
 except Exception as e:
     check("calendar list live", False, str(e)[:200])
 
 try:
     res = mod.google_people_contacts(max_results=3)
-    check("people contacts live", isinstance(res, list), f"{len(res)} contacts")
+    check("people contacts live", isinstance(res.get("items"), list), f"{res.get('result_count', 0)} contacts")
 except Exception as e:
     check("people contacts live", False, str(e)[:200])
 
 # 4. tasks live (re-consent completed 2026-08-11 — 17 scopes granted)
 try:
     res = mod.google_tasks_lists()
-    check("tasks lists live", isinstance(res, list), f"{len(res)} lists")
+    check("tasks lists live", isinstance(res.get("items"), list), f"{res.get('result_count', 0)} lists")
 except Exception as e:
     check("tasks lists live", False, str(e)[:200])
 

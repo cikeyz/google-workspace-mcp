@@ -135,14 +135,11 @@ if FORM_ID:
     except Exception as e:
         check("drive_get full payload", False, str(e)[:160])
 
-if not DOC_ID or DOC_ID == "YOUR_DOC_ID":
-    skipped("docs_read live", "no GW_FIXTURE_DOC_ID")
-else:
-    try:
-        doc = mod.google_docs_read(DOC_ID)
-        check("docs_read live", bool(doc.get("title")), doc.get("title", ""))
-    except Exception as e:
-        check("docs_read live", False, str(e)[:160])
+try:
+    doc = mod.google_docs_read(DOC_ID)
+    check("docs_read live", bool(doc.get("title")), doc.get("title", ""))
+except Exception as e:
+    check("docs_read live", False, str(e)[:160])
 
 try:
     res = mod.google_gmail_search("newer_than:90d", 3)
@@ -363,7 +360,7 @@ try:
 except Exception as e:
     check("gmail_thread_get live", False, str(e)[:160])
 try:
-    found = mod.google_people_search("a", 3)
+    found = mod.google_people_search("a", 3)["items"]
     check("people_search live", isinstance(found, list), f"{len(found)} hits")
 except Exception as e:
     check("people_search live", False, str(e)[:160])
@@ -434,7 +431,49 @@ finally:
     for k in [k for k in mod._STAGED if k.startswith("cap")]:
         mod._STAGED.pop(k, None)
 
-# ---------------------------------------------------------------- 6. audit growth
+# ---------------------------------------------------------------- 6. v2.1 guardrails
+# formula tripwire (no writes)
+try:
+    mod.google_sheets_update("x", "A1:A1", [["=IMPORTXML(1,2)"]],
+                             value_input_option="USER_ENTERED")
+    check("formula tripwire blocks", False, "USER_ENTERED formula write staged (bug)")
+except Exception as e:
+    check("formula tripwire blocks", "BLOCKED" in str(e) and "allow_formulas" in str(e))
+# OVERWRITE ack gate (no writes)
+try:
+    mod.google_sheets_append("x", "A1:A1", [["v"]], insert_data_option="OVERWRITE")
+    check("overwrite ack gate", False, "OVERWRITE staged without ack (bug)")
+except Exception as e:
+    check("overwrite ack gate", "overwrite_acknowledged" in str(e))
+# thread_key + meet config + locale ride the stage path (cancelled, never committed)
+try:
+    st = mod.google_chat_send(spaces[0]["name"] if spaces else "spaces/AAAA", "probe",
+                              thread_key="thread-123_ABC")
+    check("thread_key preview", st["preview"].get("thread_key") == "thread-123_ABC", "")
+    mod.google_write_cancel(st["operation_id"])
+    try:
+        mod.google_chat_send("spaces/AAAA", "probe", thread_key="bad key!")
+        check("thread_key validation", False, "bad key staged (bug)")
+    except Exception as e2:
+        check("thread_key validation", "thread_key" in str(e2), "")
+except Exception as e:
+    check("thread_key preview", False, str(e)[:160])
+try:
+    st = mod.google_meet_create_space({"accessType": "OPEN"})
+    mod.google_write_cancel(st["operation_id"])
+    check("meet OPEN refused", False, "OPEN staged (bug)")
+except Exception as e:
+    check("meet OPEN refused", "OPEN" in str(e) or "TRUSTED" in str(e))
+try:
+    st = mod.google_sheets_create(f"{PREFIX}LOCALE-{stamp}", locale="en_US", time_zone="America/New_York")
+    ss = commit_ok("locale sheet created", st)
+    check("locale sheet verified",
+          mod.google_sheets_metadata(ss["spreadsheetId"]).get("properties", {}).get("locale") == "en_US", "")
+    commit_ok("locale sheet trashed", mod.google_drive_trash(ss["spreadsheetId"]))
+except Exception as e:
+    check("locale sheet cycle", False, str(e)[:200])
+
+# ---------------------------------------------------------------- 7. audit growth
 audit_after = audit_lines_before()
 check("audit file grew with commits", audit_before < audit_after,
       f"{audit_before} -> {audit_after}")
