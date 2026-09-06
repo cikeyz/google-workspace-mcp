@@ -1,0 +1,9 @@
+# state: OAuth tokens, client secrets, downloads, audit logs. NEVER commit.
+state/
+.google-workspace-mcp/
+__pycache__/
+.venv/
+*.pyc
+google_token*.json
+google_client_secret*.json
+google_oauth_pending.json
