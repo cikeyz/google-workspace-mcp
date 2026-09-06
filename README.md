@@ -6,9 +6,8 @@
 
 <p align="center">
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white">
-  <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
-  <a href="https://github.com/cikeyz/google-workspace-mcp/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/cikeyz/google-workspace-mcp/ci.yml?branch=master&logo=githubactions&logoColor=white"></a>
-  <img alt="Release" src="https://img.shields.io/github/v/tag/cikeyz/google-workspace-mcp">
+  <img alt="54 tools" src="https://img.shields.io/badge/%E2%9A%99_tools-54-5A45FF.svg">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.1.0-blue.svg">
 </p>
 
 <p align="center">
