@@ -1,6 +1,8 @@
 # Google Workspace MCP
 
 <p align="center">
+  <img src="./assets/logo.svg" width="128" height="128" alt="Logo">
+  <br />
   <strong>Full-context Google Workspace tools for MCP clients, with staged writes.</strong>
 </p>
 
@@ -10,9 +12,10 @@
   <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
 </p>
 
-[Why this server](#why-this-server) | [Quick start](#quick-start) |
-[Tools](#tools) | [Configuration](#configuration) |
-[Security](#transport-and-security) | [Development](#development)
+[Why this server](#-why-this-server) | [Quick start](#-quick-start) |
+[Tools](#-tools) | [Configuration](#-configuration) |
+[Security](#-transport-and-security) | [Development](#-development) |
+[Contributing](#-contributing)
 
 > [!NOTE]
 > v2.1 changed all list tools from bare arrays to cursor envelopes
@@ -20,7 +23,7 @@
 > [`docs/MIGRATION-v2.md`](docs/MIGRATION-v2.md). Pin the `v2.0` tag to stay
 > on the old shapes.
 
-## Why this server
+## 🎯 Why this server
 
 Wrappers that trim API responses make agents decide on incomplete data. This
 server goes the other way:
@@ -37,7 +40,7 @@ server goes the other way:
 No tools were removed in v2.1. Ten list shapes changed; see the migration
 guide.
 
-## What it does
+## 📦 What it does
 
 Eleven Google Workspace services behind one server:
 
@@ -54,7 +57,7 @@ Eleven Google Workspace services behind one server:
 - Chat spaces, messages, members, staged sends
 - Meet spaces, reads, staged creates
 
-## Architecture
+## 🧭 Architecture
 
 ```mermaid
 flowchart LR
@@ -67,7 +70,7 @@ flowchart LR
   State --> Audit[Audit log]
 ```
 
-## Quick start
+## 🚀 Quick start
 
 ### Requirements
 
@@ -115,7 +118,7 @@ python setup/tests/verify_server.py
 
 Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 
-## MCP client configuration
+## 🔌 MCP client configuration
 
 ```json
 {
@@ -131,7 +134,7 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 }
 ```
 
-## Tools
+## 🧰 Tools
 
 | Tool family | Purpose | Key inputs |
 |---|---|---|
@@ -161,7 +164,7 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 | `google_auth_status` | Auth health | none |
 | `google_write_commit`, `google_write_cancel`, `google_write_list_staged` | Apply staged writes | `operation_id` |
 
-## Staged-write example
+## 📝 Staged-write example
 
 Writes never apply directly. Stage, review, then commit:
 
@@ -178,7 +181,7 @@ returns `{ "staged": true, "operation_id": "…", "preview": {…} }`, then:
 Commits revalidate first and refuse on drift. Cancels and failures are logged
 alongside commits in `logs/google-write-audit.jsonl`.
 
-## Pagination
+## 📖 Pagination
 
 ```python
 page = gmail_search("is:unread", 10)
@@ -190,7 +193,7 @@ while page["has_more"]:
 
 Empty results are `{"items": [], "has_more": false}`, never an error.
 
-## Configuration
+## ⚙️ Configuration
 
 | Variable | Default | Purpose |
 |---|---:|---|
@@ -203,7 +206,7 @@ Empty results are `{"items": [], "has_more": false}`, never an error.
 | `GW_FIXTURE_FORM_ID` | Empty | Test fixture: readable Form |
 | `GW_FIXTURE_RANGE` | `A1:B2` | Test fixture: sheet range |
 
-## Transport and security
+## 🔒 Transport and security
 
 Stdio only. No listening ports, no network surface beyond Google's own APIs.
 
@@ -215,7 +218,7 @@ Stdio only. No listening ports, no network surface beyond Google's own APIs.
   hashes. Treat it as sensitive.
 - Testing-mode OAuth clients need weekly re-consent unless verified.
 
-## Development
+## 🛠️ Development
 
 ```powershell
 $env:GOOGLE_WORKSPACE_HOME = "$PWD\state"
@@ -229,10 +232,48 @@ full stage-commit-verify-cleanup cycles across services and must finish with
 `GW_FIXTURE_DOC_ID` and `GW_FIXTURE_FORM_ID` for full coverage; fixture checks
 skip otherwise.
 
-## Upstream and license
+## 📄 Upstream and license
 
 - Repository:
   [`cikeyz/google-workspace-mcp`](https://github.com/cikeyz/google-workspace-mcp)
 - Original project: written from scratch for personal agent use, no upstream.
 
 Released under the [MIT License](LICENSE).
+
+## 🤝 Contributing
+
+1. Fork the project
+2. Create your feature branch (`git checkout -b feature/my-change`)
+3. Commit your changes (`git commit -m 'Add my change'`)
+4. Push to the branch (`git push origin feature/my-change`)
+5. Open a Pull Request
+
+Reads are free to add. Anything mutating must fit the staged-write protocol
+(stage, preview, single-use commit) and land in both test batteries.
+
+## ⭐ Star History
+
+<picture>
+  <source
+    media="(prefers-color-scheme: dark)"
+    srcset="
+      https://api.star-history.com/svg?repos=cikeyz/google-workspace-mcp&type=Date&theme=dark
+    "
+  />
+  <source
+    media="(prefers-color-scheme: light)"
+    srcset="
+      https://api.star-history.com/svg?repos=cikeyz/google-workspace-mcp&type=Date
+    "
+  />
+  <img
+    alt="Star History Chart"
+    src="https://api.star-history.com/svg?repos=cikeyz/google-workspace-mcp&type=Date"
+  />
+</picture>
+
+---
+
+<p align="center">
+  Made for agents that read everything before they act.
+</p>
