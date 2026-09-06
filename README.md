@@ -6,8 +6,21 @@
 
 <p align="center">
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg?logo=python&logoColor=white">
-  <img alt="54 tools" src="https://img.shields.io/badge/%E2%9A%99_tools-54-5A45FF.svg">
+  <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
   <img alt="Version" src="https://img.shields.io/badge/version-v2.1.0-blue.svg">
+</p>
+
+<p align="center">
+  <img alt="Gmail" title="Gmail" src="https://cdn.simpleicons.org/gmail" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Drive" title="Drive" src="https://cdn.simpleicons.org/googledrive" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Docs" title="Docs" src="https://cdn.simpleicons.org/googledocs" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Sheets" title="Sheets" src="https://cdn.simpleicons.org/googlesheets" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Slides" title="Slides" src="https://cdn.simpleicons.org/googleslides" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Forms" title="Forms" src="https://cdn.simpleicons.org/googleforms" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Calendar" title="Calendar" src="https://cdn.simpleicons.org/googlecalendar" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Chat" title="Chat" src="https://cdn.simpleicons.org/googlechat" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Meet" title="Meet" src="https://cdn.simpleicons.org/googlemeet" width="28" height="28">&nbsp;&nbsp;
+  <img alt="Tasks" title="Tasks" src="https://cdn.simpleicons.org/googletasks" width="28" height="28">
 </p>
 
 <p align="center">
