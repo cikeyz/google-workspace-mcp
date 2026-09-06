@@ -1,67 +1,238 @@
 # Google Workspace MCP
 
-A Model Context Protocol server that gives coding agents full, honest access to Google Workspace: Gmail, Drive, Docs, Sheets, Slides, Forms, Calendar, People, Tasks, Chat, and Meet. 54 tools. Every read returns the whole API resource, every write is staged, reviewed, then committed.
+<p align="center">
+  <strong>Full-context Google Workspace tools for MCP clients, with staged writes.</strong>
+</p>
 
-> v2.1 note: list tools return cursor envelopes (`items`, `next_page_token`,
-> `has_more`) instead of bare arrays. See `docs/MIGRATION-v2.md`.
+<p align="center">
+  <a href="https://github.com/cikeyz/google-workspace-mcp/blob/master/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776AB.svg">
+  <img alt="54 tools" src="https://img.shields.io/badge/tools-54-5A45FF.svg">
+</p>
 
-## Why this one
+[Why this server](#why-this-server) | [Quick start](#quick-start) |
+[Tools](#tools) | [Configuration](#configuration) |
+[Security](#transport-and-security) | [Development](#development)
 
-- **Whole context**: read tools return full API payloads, not trimmed summaries. An agent deciding on incomplete data makes bad calls.
-- **Staged writes**: no write touches Google directly. Each write stages a preview with checks and returns an `operation_id`. You review, then `google_write_commit` applies (single-use, revalidates first) or `google_write_cancel` discards.
-- **Harness-agnostic**: runs anywhere Python runs. State home is one env var (`GOOGLE_WORKSPACE_HOME`). Works with any stdio MCP host.
+> [!NOTE]
+> v2.1 changed all list tools from bare arrays to cursor envelopes
+> (`items`, `next_page_token`, `has_more`). See
+> [`docs/MIGRATION-v2.md`](docs/MIGRATION-v2.md). Pin the `v2.0` tag to stay
+> on the old shapes.
 
-## Quickstart
+## Why this server
 
-1. Create an OAuth client: any GCP project, `APIs & Services` → `OAuth consent screen` (External), then `Credentials` → `OAuth client ID` → `Desktop app`. Download the JSON.
-2. Enable the 11 APIs on that project: Drive, Gmail, Calendar, Sheets, Docs, Slides, Forms, Tasks, People, Chat, Meet. (`setup/setup.py` tells you which call failed if you miss one.)
-3. Create and activate a venv, then install deps (Python 3.11):
+Wrappers that trim API responses make agents decide on incomplete data. This
+server goes the other way:
+
+- Reads return the decision-useful resource, with a `full=True` hatch to the
+  complete payload where one exists
+- Cursor envelopes (`items`, `next_page_token`, `has_more`) on all 11 list
+  tools, so collections of any size are walkable
+- Every mutation is staged first: preview plus checks plus `operation_id`,
+  then a single-use commit that revalidates, or a cancel
+- One env var (`GOOGLE_WORKSPACE_HOME`) points at all state, so any stdio
+  MCP host can run it
+
+No tools were removed in v2.1. Ten list shapes changed; see the migration
+guide.
+
+## What it does
+
+Eleven Google Workspace services behind one server:
+
+- Gmail search, reads, thread summaries, attachment downloads, staged sends
+- Drive search, metadata, downloads, uploads, folders, sharing audit, copy,
+  move, trash
+- Docs reads (all tabs), creates, appends
+- Sheets metadata, reads, updates, appends, creates, conditional-format reads
+- Slides reads and creates
+- Forms definitions, responses, listings
+- Calendar events, patches, deletes, free/busy
+- Contacts lists, search, single reads
+- Tasks lists, reads, creates, patches, deletes
+- Chat spaces, messages, members, staged sends
+- Meet spaces, reads, staged creates
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Client[MCP client] --> Stdio[FastMCP stdio]
+  Stdio --> Tools[54 Workspace tools]
+  Tools --> Stage[Staged-write gate]
+  Stage --> Google[Google APIs]
+  Tools --> State[(State home)]
+  State --> Token[OAuth token + client]
+  State --> Audit[Audit log]
 ```
+
+## Quick start
+
+### Requirements
+
+- Python 3.11
+- A Google Cloud project with the 11 Workspace APIs enabled and a Desktop
+  OAuth client (see `docs/SKILL.md` for the click path)
+- An MCP client that can launch stdio
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/cikeyz/google-workspace-mcp.git
+Set-Location google-workspace-mcp
 python -m venv .venv
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+$env:GOOGLE_WORKSPACE_HOME = "$PWD\state"
+python setup/setup.py --client-secret C:\path\to\client_secret.json
+python setup/setup.py --auth-url
 ```
-4. Store the client: `python setup/setup.py --client-secret /path/to/client_secret.json`.
-5. Log in: `python setup/setup.py --auth-url`, open the URL, approve all scopes, paste back the redirect URL via `python setup/setup.py --auth-code '<url>'`.
-6. Verify: `python setup/tests/verify_server.py`. Expect `RESULT: ALL CHECKS PASSED`.
-7. Point your host at it (stdio): command = venv python, args = `server.py`, env = `GOOGLE_WORKSPACE_HOME` → your state dir. Example:
+
+Open the printed URL, approve all scopes, then exchange the redirect:
+
+```powershell
+python setup/setup.py --auth-code '<paste-the-redirect-url>'
+python setup/tests/verify_server.py
+```
+
+Expect `RESULT: ALL CHECKS PASSED`.
+
+### macOS or Linux
+
+```bash
+git clone https://github.com/cikeyz/google-workspace-mcp.git
+cd google-workspace-mcp
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+export GOOGLE_WORKSPACE_HOME="$PWD/state"
+python setup/setup.py --client-secret /path/to/client_secret.json
+python setup/setup.py --auth-url
+python setup/setup.py --auth-code '<paste-the-redirect-url>'
+python setup/tests/verify_server.py
+```
+
+Testing-mode OAuth clients need weekly re-consent unless the app is verified.
+
+## MCP client configuration
+
 ```json
 {
-  "command": ["C:\\path\\to\\.venv\\Scripts\\python.exe", "C:\\path\\to\\server.py"],
-  "env": {"GOOGLE_WORKSPACE_HOME": "C:\\path\\to\\state"}
+  "mcpServers": {
+    "Google Workspace": {
+      "command": "C:\\path\\to\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\server.py"],
+      "env": {
+        "GOOGLE_WORKSPACE_HOME": "C:\\path\\to\\state"
+      }
+    }
+  }
 }
 ```
 
-Set `GW_FIXTURE_DOC_ID` / `GW_FIXTURE_FORM_ID` to your own readable Doc/Form to unlock the full `setup/tests/test_server.py` battery; fixture checks SKIP when unset.
+## Tools
 
-## Scopes (17, all requested at consent)
+| Tool family | Purpose | Key inputs |
+|---|---|---|
+| `google_gmail_search`, `google_gmail_get`, `google_gmail_thread_get` | Search, read, thread summaries | `query`, `max_results`, `page_token`, `full`, `max_body_chars` |
+| `google_gmail_attachment_download` | Save attachments locally | `message_id`, `attachment_id` |
+| `google_gmail_send` (staged) | Send mail | `to`, `subject`, `body`, `cc`, `bcc` |
+| `google_drive_search`, `google_drive_get` | Find and describe files | `query`, `max_results`, `page_token`, `full` |
+| `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path` |
+| `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id` |
+| `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role` |
+| `google_drive_trash` (staged) | Recoverable delete | `file_id` |
+| `google_docs_read`, `google_docs_create`, `google_docs_append` (staged) | Read and write docs | `document_id`, `title`, `text` |
+| `google_sheets_metadata`, `google_sheets_read` | Inspect and read sheets | `spreadsheet_id`, `range_`, render options |
+| `google_sheets_update`, `google_sheets_append`, `google_sheets_create` (staged) | Write cells | `spreadsheet_id`, `range_`, `values` |
+| `google_sheets_conditional_formats` | Read format rules | `spreadsheet_id` |
+| `google_slides_get`, `google_slides_create` (staged) | Read and create decks | `presentation_id`, `title` |
+| `google_forms_list`, `google_forms_get`, `google_forms_responses` | Forms and answers | `form_id`, `page_token`, `filter_` |
+| `google_calendar_list`, `google_calendar_get` | Events | `start`, `end`, `page_token`, `q` |
+| `google_calendar_create`, `google_calendar_patch`, `google_calendar_delete` (staged) | Manage events | `summary`, `start`, `end`, `event_id` |
+| `google_calendar_freebusy` | Availability windows | `time_min`, `time_max` |
+| `google_people_contacts`, `google_people_search`, `google_people_get` | Contacts | `max_results`, `page_token`, `query`, `full` |
+| `google_tasks_lists`, `google_tasks_list`, `google_tasks_get` | Read tasks | `tasklist_id`, `page_token`, filters |
+| `google_tasks_create`, `google_tasks_update`, `google_tasks_delete` (staged) | Manage tasks | `title`, `status`, `due` |
+| `google_chat_spaces`, `google_chat_messages`, `google_chat_members` | Rooms and history | `space_name`, `page_token` |
+| `google_chat_send` (staged) | Post messages | `space_name`, `text`, `thread_key` |
+| `google_meet_create_space` (staged), `google_meet_get_space` | Meetings | `config`, `space_name` |
+| `google_auth_status` | Auth health | none |
+| `google_write_commit`, `google_write_cancel`, `google_write_list_staged` | Apply staged writes | `operation_id` |
 
-Gmail readonly, send, modify · Calendar · Drive · Contacts readonly · Spreadsheets · Documents · Forms body plus responses-readonly · Presentations · Tasks · Chat messages plus spaces-readonly plus memberships-readonly · Meet space-created plus space-readonly. Full list lives in `setup/setup.py` SCOPES.
+## Staged-write example
 
-## Env vars
+Writes never apply directly. Stage, review, then commit:
 
-- `GOOGLE_WORKSPACE_HOME`: state home (token, client secret, downloads, audit log). Primary mechanism.
-- `GOOGLE_TOKEN_PATH`, `GOOGLE_CLIENT_SECRET_PATH`, `GOOGLE_DOWNLOAD_DIR`: per-file overrides.
-- `GOOGLE_REDIRECT_URI`: OAuth redirect override (default `http://localhost:1`).
-- `GW_FIXTURE_DOC_ID`, `GW_FIXTURE_FORM_ID`, `GW_FIXTURE_RANGE`: test fixtures.
+```json
+{ "tool": "google_docs_create", "title": "GW-TEST-doc" }
+```
 
-## Staged-write protocol
+returns `{ "staged": true, "operation_id": "…", "preview": {…} }`, then:
 
-`stage → preview + checks → commit (revalidates) or cancel`. Commits are single-use, expire after 24h, cap at 20 concurrent, fail closed in cron sessions, and append to `logs/google-write-audit.jsonl`. Destructive targets always show full identity in previews.
+```json
+{ "tool": "google_write_commit", "operation_id": "…" }
+```
 
-## Layout
+Commits revalidate first and refuse on drift. Cancels and failures are logged
+alongside commits in `logs/google-write-audit.jsonl`.
 
-- `server.py` — the MCP server (FastMCP, stdio)
-- `setup/setup.py` — OAuth setup (`--check`, `--auth-url`, `--auth-code`, `--revoke`)
-- `setup/tests/` — `verify_server.py` (quick battery), `test_server.py` (full E2E with self-cleanup), `check_conditional_formats.py` (Sheets probe)
-- `docs/` — maintainer skill notes plus server inventory
+## Pagination
 
-## Security notes
+```python
+page = gmail_search("is:unread", 10)
+msgs = page["items"]
+while page["has_more"]:
+    page = gmail_search("is:unread", 10, page_token=page["next_page_token"])
+    msgs += page["items"]
+```
 
-- `state/` holds a Gmail-capable OAuth grant. Keep it user-private (`icacls` / `chmod 700`), never commit it (see `.gitignore`).
-- Testing-mode OAuth clients need weekly re-consent unless the app is verified.
-- The audit log records write metadata. Treat it as sensitive.
+Empty results are `{"items": [], "has_more": false}`, never an error.
 
-## License
+## Configuration
 
-MIT. See `LICENSE`.
+| Variable | Default | Purpose |
+|---|---:|---|
+| `GOOGLE_WORKSPACE_HOME` | `<server dir>/state` | State home: token, client secret, downloads, audit log |
+| `GOOGLE_TOKEN_PATH` | `<state>/google_token.json` | OAuth token override |
+| `GOOGLE_CLIENT_SECRET_PATH` | `<state>/google_client_secret.json` | OAuth client override |
+| `GOOGLE_DOWNLOAD_DIR` | `<state>/downloads/google` | Download target |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:1` | OAuth redirect override |
+| `GW_FIXTURE_DOC_ID` | Empty | Test fixture: readable Doc |
+| `GW_FIXTURE_FORM_ID` | Empty | Test fixture: readable Form |
+| `GW_FIXTURE_RANGE` | `A1:B2` | Test fixture: sheet range |
+
+## Transport and security
+
+Stdio only. No listening ports, no network surface beyond Google's own APIs.
+
+- `state/` holds a Gmail-capable OAuth grant. Keep the directory
+  user-private and never commit it (already in `.gitignore`).
+- Staged writes expire after 24h, cap at 20 concurrent, and fail closed in
+  cron sessions.
+- The audit log records write metadata with bodies redacted to counts and
+  hashes. Treat it as sensitive.
+- Testing-mode OAuth clients need weekly re-consent unless verified.
+
+## Development
+
+```powershell
+$env:GOOGLE_WORKSPACE_HOME = "$PWD\state"
+.\.venv\Scripts\python.exe setup\tests\verify_server.py
+.\.venv\Scripts\python.exe setup\tests\test_server.py
+```
+
+`verify_server.py` is the quick battery (no writes). `test_server.py` runs
+full stage-commit-verify-cleanup cycles across services and must finish with
+`RESULT: ALL CHECKS PASSED` and zero `GW-TEST-` residue. Set
+`GW_FIXTURE_DOC_ID` and `GW_FIXTURE_FORM_ID` for full coverage; fixture checks
+skip otherwise.
+
+## Upstream and license
+
+- Repository:
+  [`cikeyz/google-workspace-mcp`](https://github.com/cikeyz/google-workspace-mcp)
+- Original project: written from scratch for personal agent use, no upstream.
+
+Released under the [MIT License](LICENSE).
