@@ -52,7 +52,7 @@ Console enable link pattern: `https://console.cloud.google.com/apis/api/<api>.go
 ## Scope upgrade / re-consent flow (verified 2026-08-11)
 
 1. Add new scopes to the bundled skill's `setup/setup.py` SCOPES list — that file is the scope source of truth for both setup and the MCP server's token.
-2. Generate the URL **with HERMES_HOME set** (otherwise setup.py resolves `~/.hermes` and the pending PKCE state lands in the wrong place):
+2. Generate the URL **with GOOGLE_WORKSPACE_HOME set** (otherwise setup.py resolves a default home and the pending PKCE state lands in the wrong place):
    `env -u PYTHONPATH .venv/Scripts/python.exe <skill>/setup/setup.py --auth-url`
 3. User opens URL (uses `prompt=consent`, forcing a full re-consent screen with all scopes), approves, pastes back the `http://localhost:1/?code=...` redirect URL.
 4. Exchange: `--auth-code '<url>'` — overwrites the token file and stores only the scopes actually granted.
