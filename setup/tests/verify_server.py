@@ -65,11 +65,27 @@ expected = {
     "google_sheets_conditional_formats",
     "google_gmail_send", "google_calendar_patch",
     "google_drive_copy", "google_drive_update",
+    "google_gmail_labels_list", "google_gmail_modify_labels",
+    "google_gmail_search_threads",
+    "google_drive_recent", "google_drive_read_content", "google_drive_create_file",
+    "google_sheets_insert_dimension",
+    "google_calendar_list_calendars", "google_calendar_search_events",
+    "google_calendar_respond", "google_calendar_suggest_time",
+    "google_chat_search_conversations", "google_chat_mark_read",
+    "google_chat_mark_unread",
+    "google_people_profile", "google_people_search_contacts",
+    "google_universal_search",
 }
 missing = expected - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")
 unexpected = tool_names - expected
 check("no unlisted tools", not unexpected, f"unexpected={sorted(unexpected)}")
+
+# 1b. prompts registration (v2.3)
+prompt_names = {p.name for p in mod.mcp._prompt_manager.list_prompts()} if hasattr(mod.mcp, "_prompt_manager") else set()
+check("prompts registration (4 prompts)",
+      prompt_names == {"triage_inbox", "prep_meeting_brief", "summarize_thread", "find_anything"},
+      f"prompts={sorted(prompt_names)}")
 
 # 2+3. live calls with already-granted scopes
 try:
