@@ -2,9 +2,9 @@
 r"""Full test battery for the personal google-workspace MCP server.
 
 Run with the server's own venv python from PowerShell (canonical home):
-    $env:GOOGLE_WORKSPACE_HOME = "C:\Users\YOU\.google-workspace-mcp"  # or wherever your state/ lives
-    C:\Users\YOU\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
-      C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\test_server.py
+    $env:HERMES_HOME = "C:\Users\you\AppData\Local\hermes"  # state home until Phase 2
+    C:\Users\you\.agents\mcps\google-workspace\.venv\Scripts\python.exe `
+      C:\Users\you\.agents\mcps\google-workspace\setup\tests\test_server.py
 
 Coverage:
 1. Tool registration (41 tools)
@@ -29,17 +29,17 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-CANON = Path(__file__).resolve().parent.parent.parent  # setup/tests -> google-workspace-mcp
+CANON = Path(__file__).resolve().parent.parent.parent  # setup/tests -> google-workspace
 HOME = Path(os.environ.get("GOOGLE_WORKSPACE_HOME",
-                           os.environ.get("HERMES_HOME", Path.home() / ".google-workspace-mcp")))
+                           os.environ.get("HERMES_HOME", Path.home() / "AppData/Local/hermes")))
 SERVER = CANON / "server.py"
 AUDIT = HOME / "logs/google-write-audit.jsonl"
 
-# Test fixtures via env (set GW_FIXTURE_DOC_ID / GW_FIXTURE_FORM_ID to your own
-# readable Doc / Form; fixture-dependent checks SKIP when unset).
+# Personal fixtures (env overrides; company IDs are dead on the personal account).
+# DOC_ID default CPM-A1 was verified readable on you@gmail.com 2026-09-06.
 FORM_ID = os.environ.get("GW_FIXTURE_FORM_ID", "")
 FORM_RANGE = os.environ.get("GW_FIXTURE_RANGE", "A1:B2")
-DOC_ID = os.environ.get("GW_FIXTURE_DOC_ID", "")
+DOC_ID = os.environ.get("GW_FIXTURE_DOC_ID", "YOUR_DOC_ID")
 PREFIX = "GW-TEST-"
 
 
@@ -90,9 +90,17 @@ EXPECTED = {
     "google_tasks_update", "google_tasks_delete",
     "google_chat_spaces", "google_chat_messages", "google_chat_send",
     "google_meet_create_space", "google_meet_get_space",
+    "google_gmail_thread_get", "google_gmail_attachment_download",
+    "google_people_search", "google_people_get", "google_tasks_get",
+    "google_drive_permissions", "google_chat_members", "google_calendar_freebusy",
+    "google_sheets_conditional_formats",
+    "google_gmail_send", "google_calendar_patch",
+    "google_drive_copy", "google_drive_update",
 }
 missing = EXPECTED - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")
+unexpected = tool_names - EXPECTED
+check("no unlisted tools", not unexpected, f"unexpected={sorted(unexpected)}")
 
 # ---------------------------------------------------------------- 2. live reads
 sheet_id = None
@@ -127,14 +135,11 @@ if FORM_ID:
     except Exception as e:
         check("drive_get full payload", False, str(e)[:160])
 
-if not DOC_ID:
-    skipped("docs_read live", "no GW_FIXTURE_DOC_ID")
-else:
-    try:
-        doc = mod.google_docs_read(DOC_ID)
-        check("docs_read live", bool(doc.get("title")), doc.get("title", ""))
-    except Exception as e:
-        check("docs_read live", False, str(e)[:160])
+try:
+    doc = mod.google_docs_read(DOC_ID)
+    check("docs_read live", bool(doc.get("title")), doc.get("title", ""))
+except Exception as e:
+    check("docs_read live", False, str(e)[:160])
 
 try:
     msgs = mod.google_gmail_search("newer_than:90d", 3)
@@ -242,11 +247,19 @@ try:
 except Exception as e:
     check("drive_share E2E cycle", False, str(e)[:200])
 
-# 4g. Stage-only tools (never commit): chat_send (visible to people), meet (no delete API)
+# 4g. Stage-only tools (never commit): chat_send (visible to people), meet (no delete API),
+# gmail_send (sent mail cannot be un-sent)
 try:
-    st = mod.google_chat_send(spaces[0]["name"] if spaces else "spaces/AAAA", f"{PREFIX}chat-{stamp}")
-    mod.google_write_cancel(st["operation_id"])
-    check("chat_send stage-only + cancel", True, "never committed")
+    spaces = mod.google_chat_spaces(5)
+except Exception:
+    spaces = []
+try:
+    if not spaces:
+        skipped("chat_send stage-only + cancel", "no chat spaces visible")
+    else:
+        st = mod.google_chat_send(spaces[0]["name"], f"{PREFIX}chat-{stamp}")
+        mod.google_write_cancel(st["operation_id"])
+        check("chat_send stage-only + cancel", True, "never committed")
 except Exception as e:
     check("chat_send stage-only + cancel", False, str(e)[:160])
 try:
@@ -255,6 +268,94 @@ try:
     check("meet stage-only + cancel", True, "never committed")
 except Exception as e:
     check("meet stage-only + cancel", False, str(e)[:160])
+try:
+    st = mod.google_gmail_send("placeholder@localhost", f"{PREFIX}SUBJ-{stamp}", "probe body")
+    mod.google_write_cancel(st["operation_id"])
+    check("gmail_send stage-only + cancel", True, "never committed")
+except Exception as e:
+    check("gmail_send stage-only + cancel", False, str(e)[:160])
+
+# 4h. tasks_update PATCH cycle (title+status, no wipe): create -> patch -> get-verify -> delete
+try:
+    st = mod.google_tasks_create("@default", f"{PREFIX}PATCH-{stamp}")
+    tk = commit_ok("patch-target task created", st)
+    st = mod.google_tasks_update("@default", tk["id"], "completed", title=f"{PREFIX}PATCHED-{stamp}")
+    commit_ok("tasks_update patch committed", st)
+    got = mod.google_tasks_get("@default", tk["id"])
+    check("tasks_update preserved title", got.get("title") == f"{PREFIX}PATCHED-{stamp}", got.get("status", ""))
+    commit_ok("patch-target task deleted", mod.google_tasks_delete("@default", tk["id"]))
+except Exception as e:
+    check("tasks_update PATCH cycle", False, str(e)[:200])
+
+# 4i. calendar_patch cycle: create -> patch description -> get-verify -> delete
+try:
+    st = mod.google_calendar_create(f"{PREFIX}PATCH-{stamp}", "2026-12-02T00:00:00Z", "2026-12-02T01:00:00Z")
+    ev = commit_ok("patch-target event created", st)
+    st = mod.google_calendar_patch(ev["id"], description=f"{PREFIX}desc-{stamp}")
+    commit_ok("calendar_patch committed", st)
+    check("calendar_patch verified", f"{PREFIX}desc-{stamp}" in
+          mod.google_calendar_get(ev["id"]).get("description", ""))
+    commit_ok("patch-target event deleted", mod.google_calendar_delete(ev["id"]))
+except Exception as e:
+    check("calendar_patch cycle", False, str(e)[:200])
+
+# 4j. drive_copy + drive_update cycle: doc -> copy -> rename copy -> trash both
+# (Drive folders cannot be copied via files.copy, so the subject is a doc)
+try:
+    st = mod.google_docs_create(f"{PREFIX}COPYSRC-{stamp}")
+    src = commit_ok("copy-source doc created", st)
+    cp = commit_ok("drive_copy committed",
+                   mod.google_drive_copy(src["documentId"], name=f"{PREFIX}COPY2-{stamp}"))
+    check("drive_copy verified", cp.get("name", "").startswith(PREFIX))
+    commit_ok("drive_update rename committed",
+              mod.google_drive_update(cp["id"], name=f"{PREFIX}COPY3-{stamp}"))
+    check("drive_update verified",
+          mod.google_drive_get(cp["id"]).get("name", "").startswith(PREFIX))
+    commit_ok("copy trash committed", mod.google_drive_trash(cp["id"]))
+    commit_ok("source trash committed", mod.google_drive_trash(src["documentId"]))
+except Exception as e:
+    check("drive_copy/update cycle", False, str(e)[:200])
+
+# 4k. new-read live checks
+try:
+    st = mod.google_tasks_create("@default", f"{PREFIX}GET-{stamp}")
+    gk = commit_ok("get-target task created", st)
+    check("tasks_get live", mod.google_tasks_get("@default", gk["id"]).get("title", "").startswith(PREFIX), "")
+    commit_ok("get-target task deleted", mod.google_tasks_delete("@default", gk["id"]))
+except Exception as e:
+    check("tasks_get live", False, str(e)[:160])
+try:
+    perms = mod.google_drive_permissions(folder["id"])
+    check("drive_permissions live", isinstance(perms.get("permissions"), list),
+          f"{len(perms.get('permissions', []))} perms")
+except Exception as e:
+    check("drive_permissions live", False, str(e)[:160])
+try:
+    if spaces:
+        check("chat_members live", isinstance(mod.google_chat_members(spaces[0]["name"], 5), list), "")
+    else:
+        skipped("chat_members live", "no chat spaces visible")
+except Exception as e:
+    check("chat_members live", False, str(e)[:160])
+try:
+    fb = mod.google_calendar_freebusy("2026-12-01T00:00:00Z", "2026-12-02T00:00:00Z")
+    check("calendar_freebusy live", "calendars" in fb, "")
+except Exception as e:
+    check("calendar_freebusy live", False, str(e)[:160])
+try:
+    res = mod.google_gmail_search("newer_than:1d", 1)
+    if res:
+        th = mod.google_gmail_thread_get(res[0].get("threadId", ""))
+        check("gmail_thread_get live", bool(th.get("messages")), f"{len(th.get('messages', []))} msgs")
+    else:
+        skipped("gmail_thread_get live", "inbox empty for newer_than:1d")
+except Exception as e:
+    check("gmail_thread_get live", False, str(e)[:160])
+try:
+    found = mod.google_people_search("a", 3)
+    check("people_search live", isinstance(found, list), f"{len(found)} hits")
+except Exception as e:
+    check("people_search live", False, str(e)[:160])
 
 # ---------------------------------------------------------------- 5. safety semantics
 # double-commit refused
