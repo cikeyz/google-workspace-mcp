@@ -75,10 +75,10 @@ SCOPES = [
 # (httplib2 GHSA-j5g9-f88f-gfj3, stale pyasn1/google-auth) are honoured
 # regardless of install path.
 REQUIRED_PACKAGES = [
-    "google-api-python-client==2.194.0",
-    "google-auth==2.55.1",
-    "google-auth-oauthlib==1.3.1",
-    "google-auth-httplib2==0.3.1",
+    "google-api-python-client==2.200.0",
+    "google-auth==2.57.1",
+    "google-auth-oauthlib==1.4.1",
+    "google-auth-httplib2==0.4.2",
     # GHSA-j5g9-f88f-gfj3 — Decompression Bomb DoS via unbounded gzip/deflate
     "httplib2==0.32.0",
     "pyasn1==0.6.4",
