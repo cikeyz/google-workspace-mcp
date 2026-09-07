@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.5.0 (2026-09-07) — Efficiency: parallel fan-outs, keep-alive, tighter reads
+
+Non-breaking: no new tools, no signature changes, no new scopes. Same 73 tools
++ 4 prompts, measurably less waiting.
+
+- Parallel fan-outs: universal search queries sources concurrently, Gmail
+  metadata batches fetch in parallel chunks (order preserved), chat space
+  fan-out runs bounded-parallel. Single-source calls are byte-identical to
+  before (no thread pool when there is nothing to parallelize).
+- Keep-alive: one TLS session per thread instead of a fresh handshake per API
+  call. `_STAGED` is now lock-guarded for the threaded paths; service and
+  credential caches were audited benign under threads.
+- Tighter reads: Drive content stops downloading once the requested window is
+  filled (body_chars is exact only when text_truncated is false); calendar
+  revalidates fetch etag+updated only; Gmail label ops fetch labelIds only.
+- `docs_append` no longer refetches the whole doc at commit: reuses the staged
+  offset under the existing revision pin. Batch commits honor the server's
+  Retry-After instead of blind exponential backoff.
+- Bug fix: Slides table cell text now extracts (cells live under text/
+  TextContent, not content). Previously table text silently came back empty.
+- Not shipped: a bounded Slides pageElements mask. Probed live and reverted:
+  the API rejects selection of group.children and placeholder, so any mask
+  either 400s or silently drops group text. Full fetch stays until the API
+  allows proper sub-selection.
+- Verified: 12/12 parity checks live (window correctness, full-read exactness,
+  paging, universal shape, append content, zero residue), full battery green
+  except the pre-existing docs_read fixture gap.
+- Rollback: pin the v2.4 tag and restart the host.
+
 ## v2.4.0 (2026-09-07) — Docs/Slides staged writers
 
 Non-breaking: 2 new tools (71 to 73), no signature removals. No new scopes,
