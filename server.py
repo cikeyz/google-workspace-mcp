@@ -29,7 +29,9 @@ import json
 import os
 import random
 import secrets
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -101,6 +103,8 @@ class _MemoryDiscoveryCache(Cache):
 _DISCOVERY_CACHE = _MemoryDiscoveryCache()
 _CREDS = None            # process-singleton Credentials (v2 stdio: single-threaded)
 _SERVICES: dict = {}     # (api_name, version) -> built Resource
+_HTTP_LOCAL = threading.local()  # one keep-alive Http per thread (v2.5: was fresh per call)
+_STAGED_LOCK = threading.RLock()  # guards _STAGED under fan-out threads (v2.5)
 _MAX_GMAIL_FANOUT = 20
 _READ_TIMEOUT, _MEDIA_TIMEOUT, _UPLOAD_TIMEOUT = 30, 60, 120
 _WRITE_TIMEOUT = 60  # batchUpdate commits (v2.4 first _exec kind=commit consumer)
@@ -179,6 +183,17 @@ def _svc(name: str, version: str):
     return _SERVICES[key]
 
 
+def _shared_http(timeout: int):
+    """Per-thread keep-alive Http: reuses TLS across _exec calls on one thread.
+    httplib2.Http is not safe for concurrent sharing, hence thread-local."""
+    http = getattr(_HTTP_LOCAL, "http", None)
+    if http is None or getattr(_HTTP_LOCAL, "timeout", None) != timeout:
+        http = httplib2.Http(timeout=timeout)
+        _HTTP_LOCAL.http = http
+        _HTTP_LOCAL.timeout = timeout
+    return http
+
+
 def _retryable(exc: Exception) -> bool:
     if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
         return True
@@ -213,7 +228,8 @@ def _exec(req, kind: str = "read", timeout: int | None = None):
     for attempt in range(attempts):
         # NOTE: never pass a bare httplib2.Http here - it replaces the
         # credentials-authorized transport and every call 401s.
-        http = AuthorizedHttp(_get_creds(), http=httplib2.Http(timeout=timeout))
+        # v2.5: thread-local keep-alive transport instead of a fresh socket each call.
+        http = AuthorizedHttp(_get_creds(), http=_shared_http(timeout))
         try:
             return req.execute(http=http)
         except HttpError as e:
@@ -226,7 +242,7 @@ def _exec(req, kind: str = "read", timeout: int | None = None):
                 raise
             if not _retryable(e) or attempt >= attempts - 1:
                 raise
-            delay = min(1.0 * 2 ** attempt + random.uniform(0, 0.5), 20)
+            delay = _retry_delay(e, attempt)
             time.sleep(delay)
         except Exception as e:
             if kind == "commit" and attempt >= 1:
@@ -240,6 +256,19 @@ def _exec(req, kind: str = "read", timeout: int | None = None):
     raise RuntimeError("unreachable: retry loop exhausted")
 
 
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """Backoff honoring the server's Retry-After (v2.5); falls back to exponential."""
+    try:
+        resp = getattr(exc, "resp", None)
+        get = getattr(resp, "get", None)
+        raw = get("retry-after") if callable(get) else None
+        if isinstance(raw, str) and float(raw.strip() or "x") >= 0:
+            return min(float(raw.strip()), 60)
+    except (TypeError, ValueError):
+        pass
+    return min(1.0 * 2 ** attempt + random.uniform(0, 0.5), 20)
+
+
 # ---------------------------------------------------------------- Staged writes
 
 _STAGED: dict = {}  # operation_id -> operation record (in-memory, per session)
@@ -250,11 +279,12 @@ STAGED_MAX_OPS = 20
 def _purge_expired() -> int:
     """Drop expired staged ops (never applied, just forgotten). Returns count purged."""
     now = time.time()
-    expired = [oid for oid, op in _STAGED.items()
-               if now - op.get("created_ts", 0) > STAGED_TTL_SECONDS]
-    for oid in expired:
-        _STAGED.pop(oid, None)
-    return len(expired)
+    with _STAGED_LOCK:
+        expired = [oid for oid, op in _STAGED.items()
+                   if now - op.get("created_ts", 0) > STAGED_TTL_SECONDS]
+        for oid in expired:
+            _STAGED.pop(oid, None)
+        return len(expired)
 
 
 _AUDIT_MAX_BYTES = 5 * 1024 * 1024
@@ -372,17 +402,18 @@ def _stage(tool: str, args: dict, apply_fn, checks: list, preview: dict, revalid
         )
     op_id = secrets.token_hex(6)
     _purge_expired()
-    if len(_STAGED) >= STAGED_MAX_OPS:
-        raise RuntimeError(
-            f"Too many staged operations ({STAGED_MAX_OPS} max). Commit or cancel "
-            "existing ones first (google_write_list_staged)."
-        )
-    _STAGED[op_id] = {
-        "tool": tool, "args": args, "apply": apply_fn,
-        "revalidate": revalidate, "checks": checks, "preview": preview,
-        "staged_at": datetime.now(timezone.utc).isoformat(),
-        "created_ts": time.time(),
-    }
+    with _STAGED_LOCK:
+        if len(_STAGED) >= STAGED_MAX_OPS:
+            raise RuntimeError(
+                f"Too many staged operations ({STAGED_MAX_OPS} max). Commit or cancel "
+                "existing ones first (google_write_list_staged)."
+            )
+        _STAGED[op_id] = {
+            "tool": tool, "args": args, "apply": apply_fn,
+            "revalidate": revalidate, "checks": checks, "preview": preview,
+            "staged_at": datetime.now(timezone.utc).isoformat(),
+            "created_ts": time.time(),
+        }
     _audit_event("stage", op_id, tool, args=args)
     return {
         "staged": True,
@@ -412,7 +443,8 @@ def google_write_commit(operation_id: str) -> dict:
             "operations, or set HERMES_ALLOW_CRON_WRITES=1 to explicitly allow."
         )
     _purge_expired()
-    op = _STAGED.pop(operation_id, None)
+    with _STAGED_LOCK:
+        op = _STAGED.pop(operation_id, None)
     if op is None:
         raise RuntimeError(f"Unknown, cancelled, or already-applied operation: {operation_id}")
     if op.get("revalidate"):
@@ -436,7 +468,8 @@ def google_write_commit(operation_id: str) -> dict:
 def google_write_cancel(operation_id: str) -> dict:
     """Discard a staged Google Workspace write operation without applying anything."""
     _purge_expired()
-    op = _STAGED.pop(operation_id, None)
+    with _STAGED_LOCK:
+        op = _STAGED.pop(operation_id, None)
     if op is None:
         raise RuntimeError(f"Unknown, cancelled, or already-applied operation: {operation_id}")
     _audit_event("cancel", operation_id, op["tool"], args=op.get("args"))
@@ -447,11 +480,12 @@ def google_write_cancel(operation_id: str) -> dict:
 def google_write_list_staged() -> list:
     """List all staged (not yet committed/cancelled) Google Workspace write operations."""
     _purge_expired()
-    return [
-        {"operation_id": oid, "tool": op["tool"], "checks": op["checks"],
-         "preview": op["preview"], "staged_at": op["staged_at"]}
-        for oid, op in _STAGED.items()
-    ]
+    with _STAGED_LOCK:
+        return [
+            {"operation_id": oid, "tool": op["tool"], "checks": op["checks"],
+             "preview": op["preview"], "staged_at": op["staged_at"]}
+            for oid, op in _STAGED.items()
+        ]
 
 
 @mcp.tool(title='Auth Status', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
@@ -978,15 +1012,13 @@ def google_docs_append(document_id: str, text: str) -> dict:
 
     def apply():
         d = _svc("docs", "v1")
-        fresh = d.documents().get(
-            documentId=document_id, fields="revisionId,body/content").execute()
-        fresh_content = fresh.get("body", {}).get("content", [])
-        fresh_end = fresh_content[-1].get("endIndex", 1) if fresh_content else 1
-        resp = d.documents().batchUpdate(
+        # v2.5: reuse the staged end_index; revalidate() already proved the
+        # revision is unchanged, and writeControl pins it server-side.
+        resp = _exec(d.documents().batchUpdate(
             documentId=document_id,
-            body={"requests": [{"insertText": {"location": {"index": fresh_end - 1}, "text": text}}],
+            body={"requests": [{"insertText": {"location": {"index": end_index - 1}, "text": text}}],
                   "writeControl": {"requiredRevisionId": base_revision}},
-        ).execute()
+        ), kind="commit", timeout=_WRITE_TIMEOUT)
         replies = resp.get("replies", [{}])
         return {"document_id": document_id, "inserted_at": replies[0].get("insertText", {}).get("endIndex"),
                 "replies": replies}
@@ -1155,13 +1187,16 @@ def google_gmail_search(query: str = "", max_results: int = 10, page_token: str 
     headers = (["From", "Subject", "Date"] if not full else
                ["From", "To", "Cc", "Subject", "Date", "Reply-To",
                 "Message-ID", "In-Reply-To", "References", "List-Unsubscribe"])
-    got: dict = {}
+    chunks = [ids[i:i + _MAX_GMAIL_FANOUT]
+              for i in range(0, len(ids), _MAX_GMAIL_FANOUT)]
 
-    def _cb(request_id, response, exception):
-        got[request_id] = (response, exception)
+    def _fetch_chunk(chunk: list) -> dict:
+        """One batch of metadata GETs; per-chunk results (thread-confined)."""
+        local: dict = {}
 
-    for i in range(0, len(ids), _MAX_GMAIL_FANOUT):
-        chunk = ids[i:i + _MAX_GMAIL_FANOUT]
+        def _cb(request_id, response, exception):
+            local[request_id] = (response, exception)
+
         batch = g.new_batch_http_request(callback=_cb)
         for mid in chunk:
             batch.add(g.users().messages().get(
@@ -1169,6 +1204,16 @@ def google_gmail_search(query: str = "", max_results: int = 10, page_token: str 
                 fields="id,threadId,labelIds,snippet,internalDate" + (",sizeEstimate" if full else "") + ",payload/headers"),
                 request_id=mid)
         _exec(batch, kind="read", timeout=_READ_TIMEOUT)
+        return local
+
+    got: dict = {}
+    if len(chunks) > 1:
+        # v2.5: chunks in parallel; order restored below from ids.
+        with ThreadPoolExecutor(max_workers=min(len(chunks), 5)) as pool:
+            for chunk, local in zip(chunks, pool.map(_fetch_chunk, chunks)):
+                got.update(local)
+    elif chunks:
+        got = _fetch_chunk(chunks[0])
     out = []
     for mid in ids:
         response, exception = got.get(mid, (None, None))
@@ -1330,7 +1375,8 @@ def google_calendar_delete(event_id: str, calendar_id: str = "primary") -> dict:
         return {"deleted": event_id}
 
     def revalidate():
-        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
+        cur = _svc("calendar", "v3").events().get(
+            calendarId=cid, eventId=event_id, fields="etag,updated").execute()
         if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
             raise RuntimeError("Event changed since staging; refusing to delete. Re-stage.")
 
@@ -1386,11 +1432,11 @@ def _slide_text(page_element: dict) -> str:
         cells = []
         for row in page_element["table"].get("tableRows", []):
             for cell in row.get("tableCells", []):
-                for cel in cell.get("content", []):
-                    for run in cel.get("paragraph", {}).get("elements", []):
-                        tr = run.get("textRun")
-                        if tr and tr.get("content", "").strip():
-                            cells.append(tr["content"].strip())
+                # v2.5: cell text lives under text/TextContent, not content.
+                for te in cell.get("text", {}).get("textElements", []):
+                    tr = te.get("textRun")
+                    if tr and tr.get("content", "").strip():
+                        cells.append(tr["content"].strip())
         return " | ".join(cells)
     if "wordArt" in page_element:
         return page_element["wordArt"].get("renderedText", "")
@@ -1407,6 +1453,10 @@ def google_slides_get(presentation_id: str, full: bool = False, max_text_chars: 
     inventory (objectId + type + size). Text is budgeted with truncation flags;
     full=True returns the raw fetched slides as well."""
     s = _svc("slides", "v1")
+    # NOTE (v2.5): a bounded pageElements mask was probed live and reverted:
+    # the API rejects selection of group.children and placeholder, so any mask
+    # either 400s or silently drops group text. Full fetch stays; the table-text
+    # fix above works with it. Revisit if the API gains proper sub-selection.
     fields = None if full else (
         "title,presentationId,revisionId,locale,pageSize,"
         "slides(objectId,slideProperties(layoutObjectId,notesPage(pageElements)),pageElements)")
@@ -1935,7 +1985,8 @@ def google_calendar_patch(event_id: str, summary: str = "", start: str = "", end
         return c.events().patch(calendarId=cid, eventId=event_id, body=patch).execute()
 
     def revalidate():
-        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
+        cur = _svc("calendar", "v3").events().get(
+            calendarId=cid, eventId=event_id, fields="etag,updated").execute()
         if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
             raise RuntimeError("Event changed since staging; refusing to overwrite. Re-stage.")
 
@@ -2044,7 +2095,7 @@ def google_gmail_modify_labels(message_id: str, add_label_ids: str = "",
     try:
         cur = _svc("gmail", "v1").users().messages().get(
             userId="me", id=message_id, format="metadata",
-            metadataHeaders=["Subject"]).execute()
+            metadataHeaders=["Subject"], fields="id,labelIds,payload/headers").execute()
     except Exception as exc:
         raise RuntimeError(f"Message {message_id} not found: {exc}") from exc
     base_labels = sorted(cur.get("labelIds", []))
@@ -2061,7 +2112,7 @@ def google_gmail_modify_labels(message_id: str, add_label_ids: str = "",
 
     def revalidate():
         now = _svc("gmail", "v1").users().messages().get(
-            userId="me", id=message_id, format="minimal").execute()
+            userId="me", id=message_id, format="minimal", fields="labelIds").execute()
         if sorted(now.get("labelIds", [])) != base_labels:
             raise RuntimeError("Message labels changed since staging. Re-stage.")
 
@@ -2123,7 +2174,8 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
     and Slides export to text, Sheets to CSV, text/* files read directly. Drawings,
     images, and binaries are refused (use google_drive_download for those).
     Text is budgeted at max_chars with truncation flags; re-call with start_char
-    advanced to page long files."""
+    advanced to page long files. v2.5: stops downloading once the window is filled,
+    so body_chars is exact only when text_truncated is false."""
     d = _svc("drive", "v3")
     meta = _exec(d.files().get(fileId=file_id, fields="id,name,mimeType,size"), kind="read")
     mime = meta.get("mimeType", "")
@@ -2142,16 +2194,28 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
             "use google_drive_download to fetch the bytes.")
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, req, chunksize=8 * 1024 * 1024)
+    start = max(0, start_char)
+    # v2.5 early stop: bytes track chars closely for text exports; stop once the
+    # window plus a margin is buffered instead of draining multi-MB files.
+    stop_at = start + max_chars + 65536
     done = False
     while not done:
         _, done = downloader.next_chunk()
+        if buf.tell() >= stop_at:
+            break
+    complete = bool(done)
     text = buf.getvalue().decode("utf-8", errors="replace")
-    start = max(0, start_char)
     window = text[start:start + max_chars]
-    cut = (start + len(window)) < len(text)
+    if complete:
+        cut = (start + len(window)) < len(text)
+        chars = len(text)
+    else:
+        # Stopped early with bytes still on the wire: window end is not file end.
+        cut = True
+        chars = start + len(window)
     return {"id": file_id, "name": name, "mimeType": mime, "text": window,
             "text_start": start, "next_start_char": (start + len(window)) if cut else None,
-            "text_truncated": cut, "text_chars": len(text)}
+            "text_truncated": cut, "text_chars": chars}
 
 
 @mcp.tool(title='Create Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
@@ -2306,7 +2370,8 @@ def google_calendar_respond(event_id: str, response: str, calendar_id: str = "pr
                                 body={"attendees": attendees}).execute()
 
     def revalidate():
-        cur = _svc("calendar", "v3").events().get(calendarId=cid, eventId=event_id).execute()
+        cur = _svc("calendar", "v3").events().get(
+            calendarId=cid, eventId=event_id, fields="etag,updated").execute()
         if cur.get("etag") != base_etag or cur.get("updated") != base_updated:
             raise RuntimeError("Event changed since staging; refusing. Re-stage.")
 
@@ -2492,41 +2557,62 @@ def google_universal_search(query: str, sources: list | None = None,
     if not wanted:
         raise RuntimeError("sources must include at least one of drive/gmail/calendar/people/chat.")
     cap = min(max(1, max_per_source), 20)
+    now = datetime.now(timezone.utc)
+
+    def _one_source(src: str) -> dict:
+        if src == "drive":
+            return google_drive_search(query=query, max_results=cap)
+        if src == "gmail":
+            return google_gmail_search(query=query, max_results=cap)
+        if src == "calendar":
+            return google_calendar_list(
+                start=(now - timedelta(days=30)).isoformat(),
+                end=(now + timedelta(days=90)).isoformat(),
+                max_results=cap, q=query)
+        if src == "people":
+            return google_people_search_contacts(query=query, max_results=cap)
+        # chat: list spaces, then per-space message list (N+1, capped)
+        spaces = google_chat_spaces(max_results=min(10, cap * 2)).get("items", [])
+        chat_items: list = []
+
+        def _one_space(sp: dict) -> list:
+            try:
+                msgs = google_chat_messages(space_name=sp["name"], max_results=cap)
+            except Exception:
+                return []
+            return [{"space": sp.get("displayName"), **m}
+                    for m in msgs.get("items", [])
+                    if query.lower() in (m.get("text") or "").lower()]
+
+        # v2.5: spaces in parallel (bounded); order restored by slicing, not by time.
+        with ThreadPoolExecutor(max_workers=min(max(len(spaces[:10]), 1), 5)) as pool:
+            for found in pool.map(_one_space, spaces[:10]):
+                chat_items.extend(found)
+        return {"items": chat_items[:cap], "result_count": len(chat_items[:cap]),
+                "has_more": len(chat_items) > cap}
+
+    # v2.5: sources in parallel; failures isolated per source as before.
+    def _guarded(src: str) -> tuple:
+        try:
+            return (src, True, _one_source(src))
+        except Exception as exc:  # noqa: BLE001 - per-source isolation is the point
+            return (src, False, exc)
+
     results: dict = {}
     errors: dict = {}
+    if len(wanted) > 1:
+        with ThreadPoolExecutor(max_workers=min(len(wanted), 5)) as pool:
+            outcomes = list(pool.map(_guarded, wanted))
+    else:
+        outcomes = [_guarded(wanted[0])]
     total = 0
-    now = datetime.now(timezone.utc)
-    for src in wanted:
-        try:
-            if src == "drive":
-                env = google_drive_search(query=query, max_results=cap)
-            elif src == "gmail":
-                env = google_gmail_search(query=query, max_results=cap)
-            elif src == "calendar":
-                env = google_calendar_list(
-                    start=(now - timedelta(days=30)).isoformat(),
-                    end=(now + timedelta(days=90)).isoformat(),
-                    max_results=cap, q=query)
-            elif src == "people":
-                env = google_people_search_contacts(query=query, max_results=cap)
-            else:  # chat: list spaces, then per-space message list (N+1, capped)
-                spaces = google_chat_spaces(max_results=min(10, cap * 2)).get("items", [])
-                chat_items: list = []
-                for sp in spaces[:10]:
-                    try:
-                        msgs = google_chat_messages(space_name=sp["name"], max_results=cap)
-                        for m in msgs.get("items", []):
-                            if query.lower() in (m.get("text") or "").lower():
-                                chat_items.append({"space": sp.get("displayName"), **m})
-                    except Exception:
-                        continue
-                env = {"items": chat_items[:cap], "result_count": len(chat_items[:cap]),
-                       "has_more": len(chat_items) > cap}
-            results[src] = env
-            total += env.get("result_count", 0)
-        except Exception as exc:  # noqa: BLE001 - per-source isolation is the point
+    for src, ok, outcome in outcomes:
+        if not ok:
             results[src] = {"items": [], "result_count": 0}
-            errors[src] = str(exc)[:300]
+            errors[src] = str(outcome)[:300]
+        else:
+            results[src] = outcome
+            total += outcome.get("result_count", 0)
     return {"query": query, "sources_queried": wanted, "results": results,
             "errors": errors, "result_count": total}
 

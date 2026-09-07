@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.4.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.5.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
