@@ -6,7 +6,7 @@ Snapshot date: 2026-08-11 (after the 16-tool extension session). Account switche
 
 - Token file: `<hermes home>\google_token.json`; client secret: `google_client_secret.json`.
 - OAuth client: "CK's Workspace", GCP project **example-gcp-project (000000000000)**, redirect `http://localhost:1` (was "MCP-Access" / 000000000000 under ExampleCo).
-- **Scopes granted (17 — re-consent COMPLETED 2026-08-11)**: gmail.readonly, gmail.send, gmail.modify, calendar, drive, contacts.readonly, spreadsheets, documents, forms.body, forms.responses.readonly, presentations, tasks, chat.messages, chat.spaces.readonly, chat.memberships.readonly, meetings.space.created, meetings.space.readonly. All services live-verified (tasks/slides/chat/meet no longer 403).
+- **Scopes granted (19 — prior 17 + userinfo.profile + chat.users.readstate, re-consent 2026-09-06 per CHANGELOG v2.3)**: gmail.readonly, gmail.send, gmail.modify, calendar, drive, contacts.readonly, spreadsheets, documents, forms.body, forms.responses.readonly, presentations, tasks, chat.messages, chat.spaces.readonly, chat.memberships.readonly, userinfo.profile, chat.users.readstate, meetings.space.created, meetings.space.readonly. All services live-verified (tasks/slides/chat/meet no longer 403).
 - `setup.py --check` semantics: `AUTHENTICATED (partial): Token valid but missing N scopes` — N = scopes in SCOPES list but not granted. Exit code 0.
 - Pending PKCE state: `<hermes home>\google_oauth_pending.json` (created by `--auth-url`, consumed by `--auth-code`).
 
@@ -24,21 +24,23 @@ Console link pattern: `https://console.cloud.google.com/apis/api/<api>.googleapi
 
 All read tools now return FULL API payloads (question types/required/validation/options, event attendees, message headers+labels+attachments, raw person resources, etc.) instead of hand-picked subsets. Exceptions: `google_docs_read` (structured text extraction + revisionId), `google_slides_get` (per-slide text/notes/element inventory), `google_gmail_get` body (plain-text extraction, html truncated at 2000 chars) — raw payloads there are too large to be useful. `google_drive_download` is inherently a local-file tool. Write tools return the full created/updated resource.
 
-## Full tool inventory (41)
+## Full tool inventory (73 + 4 prompts, v2.4; v2.1 envelope breaking change, see MIGRATION-v2.md)
 
 - `google_auth_status`
 - Staged-write controls: `google_write_commit`, `google_write_cancel`, `google_write_list_staged`
-- Sheets: `google_sheets_metadata`, `google_sheets_read`, `google_sheets_update`, `google_sheets_append`, `google_sheets_create`
-- Drive: `google_drive_search` (full query syntax!), `google_drive_get`, `google_drive_download`, `google_drive_upload`, `google_drive_create_folder`, `google_drive_share`, `google_drive_trash`
-- Docs: `google_docs_read`, `google_docs_create`, `google_docs_append`
+- Sheets: `google_sheets_metadata`, `google_sheets_read`, `google_sheets_update`, `google_sheets_append`, `google_sheets_create`, `google_sheets_insert_dimension`, `google_sheets_conditional_formats`
+- Drive: `google_drive_search` (full query syntax!), `google_drive_get`, `google_drive_recent`, `google_drive_read_content`, `google_drive_download`, `google_drive_upload`, `google_drive_create_file`, `google_drive_create_folder`, `google_drive_share`, `google_drive_trash`, `google_drive_permissions`, `google_drive_copy`, `google_drive_update`
+- Docs: `google_docs_read`, `google_docs_create`, `google_docs_append`, `google_docs_update`
 - Forms: `google_forms_list`, `google_forms_get`, `google_forms_responses`
-- Gmail: `google_gmail_search`, `google_gmail_get`
-- Calendar: `google_calendar_list` (defaults now→+7d), `google_calendar_get`, `google_calendar_create` (ISO 8601 WITH tz), `google_calendar_delete`
-- People: `google_people_contacts`
-- Slides: `google_slides_get` (per-slide text), `google_slides_create`
-- Tasks: `google_tasks_lists`, `google_tasks_list` (`@default` = default list), `google_tasks_create`, `google_tasks_update` (completed/needsAction), `google_tasks_delete`
-- Chat: `google_chat_spaces`, `google_chat_messages`, `google_chat_send`
+- Gmail: `google_gmail_search`, `google_gmail_search_threads`, `google_gmail_get`, `google_gmail_thread_get`, `google_gmail_attachment_download`, `google_gmail_send`, `google_gmail_labels_list`, `google_gmail_modify_labels`
+- Calendar: `google_calendar_list` (defaults now→+7d), `google_calendar_get`, `google_calendar_create` (ISO 8601 WITH tz), `google_calendar_delete`, `google_calendar_patch`, `google_calendar_list_calendars`, `google_calendar_search_events`, `google_calendar_respond`, `google_calendar_suggest_time`, `google_calendar_freebusy`
+- People: `google_people_contacts`, `google_people_search`, `google_people_search_contacts`, `google_people_get`, `google_people_profile`
+- Slides: `google_slides_get` (per-slide text), `google_slides_create`, `google_slides_update`
+- Tasks: `google_tasks_lists`, `google_tasks_list` (`@default` = default list), `google_tasks_get`, `google_tasks_create`, `google_tasks_update` (completed/needsAction), `google_tasks_delete`
+- Chat: `google_chat_spaces`, `google_chat_search_conversations`, `google_chat_messages`, `google_chat_members`, `google_chat_send`, `google_chat_mark_read`, `google_chat_mark_unread`
 - Meet: `google_meet_create_space`, `google_meet_get_space`
+- Universal: `google_universal_search`
+- Prompts: `triage_inbox`, `prep_meeting_brief`, `summarize_thread`, `find_anything`
 
 ## Field notes (errors seen & their real causes)
 
@@ -46,7 +48,7 @@ All read tools now return FULL API payloads (question types/required/validation/
 - `google_forms_get` → 403 SERVICE_DISABLED even after console enablement; resolved by waiting minutes. **RESOLVED 2026-08-11 (same day, minutes later):** user re-enabled Forms API in console → `google_forms_get` PASSED live on form `YOUR_FORM_ID`. Lesson: enablement propagation is NOT guaranteed — always prove Forms works with a live call after enabling.
 - `google_tasks_lists()` pre-consent → 403 "Request had insufficient authentication scopes" — EXPECTED; proves code path works.
 - `build(name, ver)` without `credentials=` → DefaultCredentialsError (ADC fallback); always pass `credentials=_get_creds()` like `_svc()` does.
-- FastMCP introspection: `mcp._tool_manager.list_tools()` → list of tool objects; `.name` attribute (NOT a dict of name→tool).
+- MCPServer introspection: `mcp._tool_manager.list_tools()` → list of tool objects; `.name` attribute (NOT a dict of name→tool).
 
 ## Useful Drive artifacts found in the account (2026-08-11)
 

@@ -75,6 +75,7 @@ expected = {
     "google_chat_mark_unread",
     "google_people_profile", "google_people_search_contacts",
     "google_universal_search",
+    "google_docs_update", "google_slides_update",
 }
 missing = expected - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")
@@ -100,7 +101,7 @@ try:
 except Exception as e:
     check("people contacts live", False, str(e)[:200])
 
-# 4. tasks live (re-consent completed 2026-08-11 — 17 scopes granted)
+# 4. tasks live (re-consent completed 2026-09-06 - 19 scopes granted)
 try:
     res = mod.google_tasks_lists()
     check("tasks lists live", isinstance(res.get("items"), list), f"{res.get('result_count', 0)} lists")
