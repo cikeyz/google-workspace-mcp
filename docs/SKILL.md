@@ -24,25 +24,25 @@ The Hermes profile runs a Google Workspace MCP server (`google-workspace`) authe
 
 ## Key paths (canonical home — reference copy; live skill stays in the Hermes skills tree until Phase 2)
 
-- Server: `C:\Users\YOU\.agents\mcps\google-workspace\server.py` (FastMCP, `mcp==1.26.0` pinned)
+- Server: `C:\Users\YOU\.agents\mcps\google-workspace\server.py` (MCPServer, `mcp==2.1.1` pinned)
 - Interpreter: `C:\Users\YOU\.agents\mcps\google-workspace\.venv\Scripts\python.exe` — MUST stay self-sufficient (the MCP client spawns a filtered env, no PYTHONPATH)
 - Config per harness (all launch the canonical server; Hermes still points at its old copy until Phase 2): opencode `opencode.json`, Codex `config.toml`, ZCode `config.json`, Hermes `config.yaml` → `mcp_servers.google-workspace`
 - Auth: `GOOGLE_WORKSPACE_HOME` → state dir holding `google_token.json` + `google_client_secret.json` (legacy `HERMES_HOME` still honored as fallback); OAuth client "CK's Workspace" (GCP project example-gcp-project / 000000000000), redirect `http://localhost:1`
 - Scope source of truth: canonical `setup/setup.py` SCOPES list (also the auth tool: `--auth-url` / `--auth-code` / `--check`)
 - Tests: canonical `setup/tests/verify_server.py` (quick) + `test_server.py` (full E2E) — run with `HERMES_HOME` set to the state home
 
-## Service matrix (11 services, 54 tools - v2.1 envelopes, see MIGRATION-v2.md)
+## Service matrix (11 services, 73 tools + 4 prompts - v2.3 envelopes, see MIGRATION-v2.md)
 
 | Service | API to enable (console) | Scope | Tools |
 |---|---|---|---|
 | sheets v4 | Sheets API | spreadsheets | metadata, read, update, append, create, conditional_formats |
 | drive v3 | Drive API | drive | search, get, download, upload, create_folder, share, trash, permissions, copy, update |
-| docs v1 | Docs API | documents | read, create, append |
+| docs v1 | Docs API | documents | read, create, append, update |
 | forms v1 | Forms API | forms.body, forms.responses.readonly | list, get, responses |
 | gmail v1 | Gmail API | gmail.readonly, gmail.send, gmail.modify | search, get, thread_get, attachment_download, send |
 | calendar v3 | Calendar API | calendar | list, get, create, delete, patch, freebusy |
 | people v1 | People API | contacts.readonly | contacts, search, get |
-| slides v1 | Slides API | presentations | get, create |
+| slides v1 | Slides API | presentations | get, create, update |
 | tasks v1 | Tasks API | tasks | lists, list, get, create, update, delete |
 | chat v1 | Chat API | chat.messages, chat.spaces.readonly, chat.memberships.readonly | spaces, messages, send, members |
 | meet v2 | Meet API | meetings.space.created, meetings.space.readonly | create_space, get_space |
@@ -66,7 +66,7 @@ No google_* write tool touches Google directly. Each one STAGES: it snapshots th
 
 Hardening (2026-08-11): `google_write_commit` **fails closed in cron** (`HERMES_CRON_SESSION` set → blocked unless `HERMES_ALLOW_CRON_WRITES=1`); staged ops **expire after 24h** and cap at **20 concurrent**; commits are logged to `<HERMES_HOME>/logs/google-write-audit.jsonl` by both the server and the `google-write-guard` plugin (audit-only, no prompts).
 
-**Testing:** `setup/tests/test_server.py` is the full battery (54 tools, live reads across services, E2E stage→commit→verify→cleanup per write tool with `GW-TEST-` artifacts, double-commit/cron/TTL/cap semantics, audit growth). `setup/tests/verify_server.py` is the quick 5-check battery. Run both after every server change.
+**Testing:** `setup/tests/test_server.py` is the full battery (71 tools + 4 prompts, live reads across services, E2E stage→commit→verify→cleanup per write tool with `GW-TEST-` artifacts, double-commit/cron/TTL/cap semantics, audit growth). `setup/tests/verify_server.py` is the quick 5-check battery. Run both after every server change.
 
 **MAINTENANCE RULE: when adding a write tool to server.py, (1) implement it with the `_stage(...)` pattern (apply_fn + checks + preview + optional revalidate), (2) add its name to `AUDITED_TOOLS` in the plugin, (3) add it to both test scripts' expected tool sets, (4) run `test_server.py`.**
 
@@ -80,12 +80,12 @@ Hardening (2026-08-11): `google_write_commit` **fails closed in cron** (`HERMES_
 - **API enablement propagation**: `403 SERVICE_DISABLED` right after enabling an API in the console is normal — retry after ~5 minutes before touching the console again.
 - **drive search query**: `query` is a full Drive API query string (`name contains 'X'`); bare words → `400 Invalid Value`.
 - **Pre-consent 403s**: tasks/slides/chat/meet return `403 insufficient authentication scopes` until the new scopes are consented — that is the designed failure mode, not a code bug.
-- **FastMCP introspection**: `mcp._tool_manager.list_tools()` returns a LIST of tool objects (use `.name`), not a dict.
+- **MCPServer introspection**: `mcp._tool_manager.list_tools()` returns a LIST of tool objects (use `.name`), not a dict.
 - **Invocation pattern**: `env -u PYTHONPATH` + explicit `C:/...` paths are the reliable way to run this venv's python from git-bash.
 
 ## Verification
 
-Run `setup/tests/verify_server.py` with the .venv python (`env -u PYTHONPATH`). Expected: 54 tools registered, calendar list + people contacts + tasks lists PASS live (all 17 scopes granted 2026-08-11). Extend the script when adding tools.
+Run `setup/tests/verify_server.py` with the .venv python (`env -u PYTHONPATH`). Expected: 73 tools + 4 prompts registered, calendar list + people contacts + tasks lists PASS live (all 19 scopes granted 2026-09-06). Extend the script when adding tools.
 
 ## User preference
 

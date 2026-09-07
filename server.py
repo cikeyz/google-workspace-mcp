@@ -103,6 +103,9 @@ _CREDS = None            # process-singleton Credentials (v2 stdio: single-threa
 _SERVICES: dict = {}     # (api_name, version) -> built Resource
 _MAX_GMAIL_FANOUT = 20
 _READ_TIMEOUT, _MEDIA_TIMEOUT, _UPLOAD_TIMEOUT = 30, 60, 120
+_WRITE_TIMEOUT = 60  # batchUpdate commits (v2.4 first _exec kind=commit consumer)
+_BATCH_MAX_REQUESTS = 50  # per-op cap: batches apply sequentially, keep them small
+_BATCH_MAX_CHARS = 50000  # total inserted/replacement text per staged op
 
 
 def _secure_write_json(path: Path, obj: dict) -> None:
@@ -278,11 +281,27 @@ def _audit_rotate() -> None:
         pass
 
 
-def _audit_scrub_args(tool: str, args: dict) -> dict:
+def _audit_scrub_args(tool: str, args: dict | None = None) -> dict:
     """Keep identity + counts, drop bodies. Never logs values/text/attendees."""
     kept: dict = {}
     for k, v in (args or {}).items():
-        if k.endswith("_id") or k.endswith("_ids") or k in (
+        if k == "requests" and isinstance(v, list):
+            # Structural batches: histogram + insert volume, never the text.
+            hist: dict = {}
+            chars = 0
+            for req in v:
+                kind = next(iter(req), "?") if isinstance(req, dict) else "?"
+                hist[kind] = hist.get(kind, 0) + 1
+                try:
+                    blob = json.dumps(req, ensure_ascii=False)
+                except Exception:
+                    blob = ""
+                if kind in ("insertText", "replaceAllText"):
+                    chars += len(blob)
+            kept["requests_count"] = len(v)
+            kept["requests_by_kind"] = hist
+            kept["requests_chars"] = chars
+        elif k.endswith("_id") or k.endswith("_ids") or k in (
                 "range_", "range", "role", "status", "space_name",
                 "tasklist_id", "calendar_id", "mimeType"):
             kept[k] = v
@@ -2375,7 +2394,8 @@ def _chat_space_read_state(space_name: str) -> dict:
 @mcp.tool(title='Mark Chat Read (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_chat_mark_read(space_name: str) -> dict:
     """STAGED write: mark a Chat space as read up to now (clears your unread badge).
-    Space-level only; thread replies keep their own state. Returns a preview +
+    Space-level only; thread replies keep their own state. Needs a Chat app
+    configured in the Cloud project or the commit 404s. Returns a preview +
     operation_id; apply with google_write_commit."""
     state = _chat_space_read_state(space_name)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -2396,7 +2416,8 @@ def google_chat_mark_read(space_name: str) -> dict:
 @mcp.tool(title='Mark Chat Unread (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_chat_mark_unread(space_name: str) -> dict:
     """STAGED write: mark a Chat space as unread (restores your unread badge from the
-    latest message). Space-level only. Returns a preview + operation_id; apply with
+    latest message). Space-level only. Needs a Chat app configured in the Cloud
+    project or the commit 404s. Returns a preview + operation_id; apply with
     google_write_commit."""
     state = _chat_space_read_state(space_name)
     try:
@@ -2560,6 +2581,267 @@ def find_anything(query: str, surfaces: str = "all") -> str:
         "google_people_search_contacts in parallel when a source needs special args. Merge by ID, "
         "rank by recency, cite which surface each hit came from. Read-only."
     )
+
+
+# ---------------------------------------------------------------- v2.4 additions
+
+_DOCS_WRITES = ("insertText", "deleteContentRange", "replaceAllText", "updateTextStyle")
+_SLIDES_WRITES = ("createSlide", "insertText", "deleteText", "deleteObject", "replaceAllText")
+
+
+def _utf16_units(text: str) -> int:
+    """Docs/Slides indices are UTF-16 code units; Python len() lies on emoji/CJK."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _short(text: str, n: int = 40) -> str:
+    text = text or ""
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def _summarize_docs_request(req: dict, tab_ends: dict, default_tab) -> tuple:
+    """One human line + (chars_added, chars_removed, destructive) per Docs request."""
+    kind = next(iter(req), "?")
+    p = req.get(kind, {}) if isinstance(req, dict) else {}
+    tab = ((p.get("location") or p.get("range") or {}).get("tabId")
+           if isinstance(p, dict) else None)
+    end_index = tab_ends.get(tab, tab_ends.get(default_tab, 1))
+    if kind == "insertText":
+        loc = p.get("location", {})
+        idx = loc.get("index", "end")
+        if not isinstance(idx, int) or not 1 <= idx <= max(end_index - 1, 1):
+            raise RuntimeError(f"insertText index {idx!r} out of body bounds 1..{end_index - 1}.")
+        return (f"insert {_utf16_units(p.get('text', ''))} chars at index {idx} "
+                f"'{_short(p.get('text', ''))}'",
+                _utf16_units(p.get("text", "")), 0, False)
+    if kind == "deleteContentRange":
+        r = p.get("range", {})
+        s, e = r.get("startIndex"), r.get("endIndex")
+        if not isinstance(s, int) or not isinstance(e, int) or not 1 <= s < e <= end_index:
+            raise RuntimeError(f"deleteContentRange [{s!r},{e!r}] out of bounds 1..{end_index}.")
+        return (f"delete chars {s}-{e} ({e - s} units)", 0, e - s, True)
+    if kind == "replaceAllText":
+        find = ((p.get("containsText") or {}).get("text") or "")
+        if not find.strip():
+            raise RuntimeError("replaceAllText with empty find text would rewrite the whole doc; refused.")
+        return (f"replace all '{_short(find)}' with '{_short(p.get('replaceText', ''))}' "
+                f"(matchCase={(p.get('containsText') or {}).get('matchCase', False)})",
+                _utf16_units(p.get("replaceText", "")), 0, True)
+    if kind == "updateTextStyle":
+        r = p.get("range", {})
+        if not p.get("fields"):
+            raise RuntimeError("updateTextStyle needs a fields mask (e.g. 'bold,italic').")
+        return (f"restyle chars {r.get('startIndex')}-{r.get('endIndex')}: {p.get('fields')}",
+                0, 0, False)
+    raise RuntimeError(f"Unsupported Docs request '{kind}'; allowlist: {', '.join(_DOCS_WRITES)}.")
+
+
+def _summarize_slides_request(req: dict, ctx: dict) -> tuple:
+    """One human line + (chars_added, chars_removed, destructive) per Slides request."""
+    kind = next(iter(req), "?")
+    p = req.get(kind, {}) if isinstance(req, dict) else {}
+    if kind == "createSlide":
+        idx = p.get("insertionIndex", ctx["slide_count"])
+        if not isinstance(idx, int) or not 0 <= idx <= ctx["slide_count"]:
+            raise RuntimeError(f"createSlide insertionIndex {idx!r} out of 0..{ctx['slide_count']}.")
+        layout = ((p.get("slideLayoutReference") or {}).get("predefinedLayout")
+                  or p.get("slideLayoutReference", {}).get("layoutId", "BLANK"))
+        return (f"new slide at index {idx}, layout {layout}", 0, 0, False)
+    if kind in ("insertText", "deleteText"):
+        oid = p.get("objectId", "")
+        if oid not in ctx["objects"]:
+            raise RuntimeError(f"{kind} target {oid!r} not found in this presentation.")
+        if kind == "insertText":
+            return (f"insert {_utf16_units(p.get('text', ''))} chars into {oid} "
+                    f"({_short(ctx['objects'][oid]) or 'object'})", _utf16_units(p.get("text", "")), 0, False)
+        return (f"delete text in {oid}", 0, 0, True)
+    if kind == "deleteObject":
+        oid = p.get("objectId", "")
+        if oid not in ctx["objects"] and oid not in ctx["slides"]:
+            raise RuntimeError(f"deleteObject target {oid!r} is neither a slide nor an element.")
+        label = ctx["objects"].get(oid, f"slide {ctx['slides'].get(oid, '?')}")
+        return (f"delete {oid} (was: {_short(label)})", 0, 0, True)
+    if kind == "replaceAllText":
+        find = ((p.get("containsText") or {}).get("text") or "")
+        if not find.strip():
+            raise RuntimeError("replaceAllText with empty find text would rewrite the deck; refused.")
+        pages = p.get("pageObjectIds") or []
+        if not pages and not ctx.get("deck_wide"):
+            raise RuntimeError("replaceAllText without pageObjectIds hits the whole deck; "
+                               "scope it or re-stage with deck_wide_acknowledged=True.")
+        for pg in pages:
+            if pg not in ctx["slides"]:
+                raise RuntimeError(f"replaceAllText page {pg!r} is not a slide of this deck.")
+        scope = f"{len(pages)} slide(s)" if pages else "whole deck (acknowledged)"
+        return (f"replace all '{_short(find)}' with '{_short(p.get('replaceText', ''))}' "
+                f"across {scope}", _utf16_units(p.get("replaceText", "")), 0, True)
+    raise RuntimeError(f"Unsupported Slides request '{kind}'; allowlist: {', '.join(_SLIDES_WRITES)}.")
+
+
+@mcp.tool(title='Update Doc (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+def google_docs_update(document_id: str, requests: list, destructive_acknowledged: bool = False) -> dict:
+    """STAGED write: apply up to 50 structural edits to a Google Doc in one batch
+    (insertText, deleteContentRange, replaceAllText, updateTextStyle). requests use
+    UTF-16 indices; read the doc first for offsets. Deletes/replaces need
+    destructive_acknowledged=True. Returns a per-request preview + operation_id;
+    apply with google_write_commit. Refuses to commit if the doc changed since staging.
+    NOTE: the batch applies sequentially, not atomically: a late failure can leave
+    early requests applied. Keep batches small and single-intent."""
+    if not isinstance(requests, list) or not requests:
+        raise RuntimeError("requests must be a non-empty list.")
+    if len(requests) > _BATCH_MAX_REQUESTS:
+        raise RuntimeError(f"{len(requests)} requests exceeds the {_BATCH_MAX_REQUESTS} cap; split the batch.")
+    total_chars = sum(_utf16_units(json.dumps(r, ensure_ascii=False)) for r in requests)
+    if total_chars > _BATCH_MAX_CHARS:
+        raise RuntimeError(f"Batch text volume {total_chars} exceeds {_BATCH_MAX_CHARS}; split the batch.")
+    for req in requests:
+        if not isinstance(req, dict) or len(req) != 1:
+            raise RuntimeError("Each request must be a single-key object like "
+                               "{'insertText': {...}}.")
+        if next(iter(req)) not in _DOCS_WRITES:
+            raise RuntimeError(f"Unsupported Docs request '{next(iter(req))}'; allowlist: "
+                               f"{', '.join(_DOCS_WRITES)}.")
+    try:
+        doc = _exec(_svc("docs", "v1").documents().get(
+            documentId=document_id,
+            fields="title,revisionId,tabs(tabProperties(tabId,title),"
+                   "documentTab(body(content(startIndex,endIndex))))"), kind="read")
+    except Exception as exc:
+        raise RuntimeError(f"Document {document_id} not accessible: {exc}") from exc
+    # Tabs and legacy body cannot mix in one mask: tabs first, body fallback.
+    tab_ends: dict = {}
+    for t in doc.get("tabs", []):
+        tid = (t.get("tabProperties") or {}).get("tabId")
+        segs = ((t.get("documentTab") or {}).get("body") or {}).get("content", [])
+        if segs:
+            tab_ends[tid] = segs[-1].get("endIndex", 1)
+    if not tab_ends:
+        legacy = _exec(_svc("docs", "v1").documents().get(
+            documentId=document_id,
+            fields="title,revisionId,body(content(startIndex,endIndex))"), kind="read")
+        content = legacy.get("body", {}).get("content", [])
+        tab_ends[None] = content[-1].get("endIndex", 1) if content else 1
+        doc = legacy
+    default_tab = next(iter(tab_ends))
+    base_revision = doc.get("revisionId")
+    for req in requests:
+        for loc_key in ("location", "range"):
+            tab = ((req.get(next(iter(req)), {}) or {}).get(loc_key, {}) or {}).get("tabId")
+            if tab is not None and tab not in tab_ends:
+                raise RuntimeError(f"tabId {tab!r} not in this document.")
+    summaries: list = []
+    added = removed = 0
+    destructive = False
+    for i, req in enumerate(requests):
+        summary, a, r, d = _summarize_docs_request(req, tab_ends, default_tab)
+        summaries.append({"i": i, "summary": summary,
+                          "chars_added": a, "chars_removed": r})
+        added += a
+        removed += r
+        destructive = destructive or d
+    if destructive and not destructive_acknowledged:
+        raise RuntimeError("Batch deletes or replaces text; re-stage with destructive_acknowledged=True.")
+
+    def apply():
+        d = _svc("docs", "v1")
+        return _exec(d.documents().batchUpdate(
+            documentId=document_id,
+            body={"requests": requests,
+                  "writeControl": {"requiredRevisionId": base_revision}}),
+            kind="commit", timeout=_WRITE_TIMEOUT)
+
+    def revalidate():
+        cur = _exec(_svc("docs", "v1").documents().get(
+            documentId=document_id, fields="revisionId"), kind="revalidate")
+        if cur.get("revisionId") != base_revision:
+            raise RuntimeError("Document changed since staging. Re-stage.")
+
+    return _stage("google_docs_update", {"document_id": document_id, "requests": requests},
+                  apply, ["document exists", f"{len(requests)} requests within caps",
+                          "indices inside body bounds",
+                          "sequential batch: keep small, single-intent (non-atomic)"],
+                  {"document_id": document_id, "title": doc.get("title", ""),
+                   "base_revision": (base_revision or "")[:8],
+                   "request_count": len(requests), "summaries": summaries,
+                   "totals": {"chars_added": added, "chars_removed": removed,
+                              "destructive": destructive}}, revalidate)
+
+
+@mcp.tool(title='Update Presentation (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+def google_slides_update(presentation_id: str, requests: list,
+                         destructive_acknowledged: bool = False,
+                         deck_wide_acknowledged: bool = False) -> dict:
+    """STAGED write: apply up to 50 structural edits to Google Slides in one batch
+    (createSlide, insertText, deleteText, deleteObject, replaceAllText). Target IDs
+    come from google_slides_get elements. Deletes need destructive_acknowledged=True;
+    deck-wide replace needs deck_wide_acknowledged=True (else scope pageObjectIds).
+    Returns a per-request preview + operation_id; apply with google_write_commit.
+    Refuses to commit if the deck changed since staging. NOTE: sequential, not
+    atomic: a late failure can leave early requests applied. Keep batches small."""
+    if not isinstance(requests, list) or not requests:
+        raise RuntimeError("requests must be a non-empty list.")
+    if len(requests) > _BATCH_MAX_REQUESTS:
+        raise RuntimeError(f"{len(requests)} requests exceeds the {_BATCH_MAX_REQUESTS} cap; split the batch.")
+    total_chars = sum(_utf16_units(json.dumps(r, ensure_ascii=False)) for r in requests)
+    if total_chars > _BATCH_MAX_CHARS:
+        raise RuntimeError(f"Batch text volume {total_chars} exceeds {_BATCH_MAX_CHARS}; split the batch.")
+    for req in requests:
+        if not isinstance(req, dict) or len(req) != 1:
+            raise RuntimeError("Each request must be a single-key object like "
+                               "{'createSlide': {...}}.")
+        if next(iter(req)) not in _SLIDES_WRITES:
+            raise RuntimeError(f"Unsupported Slides request '{next(iter(req))}'; allowlist: "
+                               f"{', '.join(_SLIDES_WRITES)}.")
+    try:
+        pres = _exec(_svc("slides", "v1").presentations().get(
+            presentationId=presentation_id,
+            fields="title,revisionId,slides(objectId,pageElements(objectId))"), kind="read")
+    except Exception as exc:
+        raise RuntimeError(f"Presentation {presentation_id} not accessible: {exc}") from exc
+    slides = pres.get("slides", [])
+    ctx = {"slide_count": len(slides), "deck_wide": deck_wide_acknowledged,
+           "slides": {sl.get("objectId"): n for n, sl in enumerate(slides)},
+           "objects": {el.get("objectId"): (el.get("title") or el.get("description") or "")
+                       for sl in slides for el in sl.get("pageElements", [])}}
+    base_revision = pres.get("revisionId")
+    summaries = []
+    added = removed = 0
+    destructive = False
+    for i, req in enumerate(requests):
+        summary, a, r, d = _summarize_slides_request(req, ctx)
+        summaries.append({"i": i, "summary": summary,
+                          "chars_added": a, "chars_removed": r})
+        added += a
+        removed += r
+        destructive = destructive or d
+    if destructive and not destructive_acknowledged:
+        raise RuntimeError("Batch deletes text/objects; re-stage with destructive_acknowledged=True.")
+
+    def apply():
+        s = _svc("slides", "v1")
+        return _exec(s.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": requests,
+                  "writeControl": {"requiredRevisionId": base_revision}}),
+            kind="commit", timeout=_WRITE_TIMEOUT)
+
+    def revalidate():
+        cur = _exec(_svc("slides", "v1").presentations().get(
+            presentationId=presentation_id, fields="revisionId"), kind="revalidate")
+        if cur.get("revisionId") != base_revision:
+            raise RuntimeError("Presentation changed since staging. Re-stage.")
+
+    return _stage("google_slides_update", {"presentation_id": presentation_id,
+                                           "requests": requests},
+                  apply, ["presentation exists", f"{len(requests)} requests within caps",
+                          "all target IDs verified at stage",
+                          "sequential batch: keep small, single-intent (non-atomic)"],
+                  {"presentation_id": presentation_id, "title": pres.get("title", ""),
+                   "base_revision": (base_revision or "")[:8],
+                   "slide_count": len(slides), "request_count": len(requests),
+                   "summaries": summaries,
+                   "totals": {"chars_added": added, "chars_removed": removed,
+                              "destructive": destructive}}, revalidate)
 
 
 def main() -> None:

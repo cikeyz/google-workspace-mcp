@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.3.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.4.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -60,10 +60,10 @@ Eleven Google Workspace services behind one server:
 - Gmail search, reads, thread summaries, labels, attachment downloads, staged sends
 - Drive search, metadata, inline text reads, recency, downloads, uploads, creates,
   folders, sharing audit, copy, move, trash
-- Docs reads (all tabs), creates, appends
+- Docs reads (all tabs), creates, appends, staged batch updates
 - Sheets metadata, reads, updates, appends, creates, dimension inserts,
   conditional-format reads
-- Slides reads and creates
+- Slides reads, creates, staged batch updates
 - Forms definitions, responses, listings
 - Calendar lists, events, calendars, search, RSVP, time suggestions, patches,
   deletes, free/busy
@@ -79,7 +79,7 @@ Eleven Google Workspace services behind one server:
 ```mermaid
 flowchart LR
   Client[MCP client] --> Stdio[MCP stdio]
-  Stdio --> Tools[71 Workspace tools + 4 prompts]
+  Stdio --> Tools[73 Workspace tools + 4 prompts]
   Tools --> Stage[Staged-write gate]
   Stage --> Google[Google APIs]
   Tools --> State[(State home)]
@@ -166,11 +166,13 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 | `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role` |
 | `google_drive_trash` (staged) | Recoverable delete | `file_id` |
 | `google_docs_read`, `google_docs_create`, `google_docs_append` (staged) | Read and write docs | `document_id`, `title`, `text` |
+| `google_docs_update` (staged) | Structural doc edits (insert, delete, replace, style) | `document_id`, `requests`, `destructive_acknowledged` |
 | `google_sheets_metadata`, `google_sheets_read` | Inspect and read sheets | `spreadsheet_id`, `range_`, render options |
 | `google_sheets_update`, `google_sheets_append`, `google_sheets_create` (staged) | Write cells | `spreadsheet_id`, `range_`, `values` |
 | `google_sheets_insert_dimension` (staged) | Insert rows/columns | `spreadsheet_id`, `sheet_id`, `dimension`, `start_index`, `end_index` |
 | `google_sheets_conditional_formats` | Read format rules | `spreadsheet_id` |
 | `google_slides_get`, `google_slides_create` (staged) | Read and create decks | `presentation_id`, `title` |
+| `google_slides_update` (staged) | Structural deck edits (slides, text, replace) | `presentation_id`, `requests`, `destructive_acknowledged` |
 | `google_forms_list`, `google_forms_get`, `google_forms_responses` | Forms and answers | `form_id`, `page_token`, `filter_` |
 | `google_calendar_list`, `google_calendar_get`, `google_calendar_search_events` | Events | `start`, `end`, `page_token`, `q`, `calendar_id` |
 | `google_calendar_list_calendars` | Discover calendars | `max_results`, `page_token` |

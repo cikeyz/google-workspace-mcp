@@ -7,7 +7,7 @@ Run with the server's own venv python from PowerShell (canonical home):
       C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\test_server.py
 
 Coverage:
-1. Tool registration (71 tools, 4 prompts)
+1. Tool registration (73 tools, 4 prompts)
 2. Live READ checks across every service (real known IDs; read-only)
 3. Staged-write E2E per write tool with SELF-CLEANUP:
    calendar create->delete, tasks create->delete, drive folder create->trash,
@@ -106,6 +106,7 @@ EXPECTED = {
     "google_chat_mark_unread",
     "google_people_profile", "google_people_search_contacts",
     "google_universal_search",
+    "google_docs_update", "google_slides_update",
 }
 missing = EXPECTED - tool_names
 check(f"tool registration ({len(tool_names)} tools)", not missing, f"missing={sorted(missing)}")
@@ -375,6 +376,61 @@ try:
 except Exception as e:
     check("people_search live", False, str(e)[:160])
 
+# 4l2. v2.3 live reads backfill (all read-only, no cleanup)
+try:
+    labels = mod.google_gmail_labels_list()["items"]
+    check("gmail_labels_list live", any(l.get("id") == "INBOX" for l in labels),
+          f"{len(labels)} labels")
+except Exception as e:
+    check("gmail_labels_list live", False, str(e)[:160])
+try:
+    th = mod.google_gmail_search_threads("newer_than:90d", max_results=2)
+    check("gmail_search_threads live", isinstance(th.get("items"), list),
+          f"{th.get('result_count', 0)} threads")
+except Exception as e:
+    check("gmail_search_threads live", False, str(e)[:160])
+try:
+    rec = mod.google_drive_recent(max_results=2)
+    check("drive_recent live", isinstance(rec.get("items"), list),
+          f"{rec.get('result_count', 0)} files")
+except Exception as e:
+    check("drive_recent live", False, str(e)[:160])
+try:
+    cals = mod.google_calendar_list_calendars(max_results=10)["items"]
+    check("list_calendars live", any(c.get("primary") for c in cals),
+          f"{len(cals)} calendars")
+except Exception as e:
+    check("list_calendars live", False, str(e)[:160])
+try:
+    sug = mod.google_calendar_suggest_time("2026-12-10T00:00:00Z", "2026-12-10T12:00:00Z", 60)
+    check("suggest_time live", isinstance(sug.get("slots"), list),
+          f"{sug.get('slot_count', 0)} slots")
+except Exception as e:
+    check("suggest_time live", False, str(e)[:160])
+try:
+    conv = mod.google_chat_search_conversations("a", 5)
+    check("search_conversations live", isinstance(conv.get("items"), list),
+          f"{conv.get('result_count', 0)} spaces")
+except Exception as e:
+    check("search_conversations live", False, str(e)[:160])
+try:
+    prof = mod.google_people_profile()
+    check("people_profile live", bool((prof.get("names") or [{}])[0].get("displayName")), "")
+except Exception as e:
+    check("people_profile live", False, str(e)[:160])
+try:
+    sc = mod.google_people_search_contacts("a", 3)
+    check("search_contacts live", isinstance(sc.get("items"), list),
+          f"{sc.get('result_count', 0)} hits")
+except Exception as e:
+    check("search_contacts live", False, str(e)[:160])
+try:
+    uni = mod.google_universal_search(f"GW-TEST-NOPE-{stamp}", ["drive", "gmail"], 2)
+    check("universal_search live", uni.get("result_count", -1) >= 0,
+          f"queried={uni.get('sources_queried')}")
+except Exception as e:
+    check("universal_search live", False, str(e)[:160])
+
 # 4l. cursor round-trip on calendar (seeded events) + empty-page contract
 try:
     seeds = []
@@ -399,6 +455,127 @@ try:
     check("empty page contract", empty["items"] == [] and empty["has_more"] is False, "")
 except Exception as e:
     check("empty page contract", False, str(e)[:160])
+
+# 4m. gmail modify STAR restore cycle (add, verify, remove-if-absent-before, verify)
+try:
+    newest = mod.google_gmail_search("newer_than:90d", 1)["items"]
+    if not newest:
+        skipped("gmail_modify live", "inbox empty for newer_than:90d")
+    else:
+        mid = newest[0]["id"]
+        before = mod.google_gmail_get(mid).get("labelIds", [])
+        had_star = "STARRED" in before
+        commit_ok("gmail star added",
+                  mod.google_gmail_modify_labels(mid, add_label_ids="STARRED"))
+        check("gmail star verified",
+              "STARRED" in mod.google_gmail_get(mid).get("labelIds", []), "")
+        if not had_star:
+            commit_ok("gmail star removed",
+                      mod.google_gmail_modify_labels(mid, remove_label_ids="STARRED"))
+            check("gmail star restored",
+                  "STARRED" not in mod.google_gmail_get(mid).get("labelIds", []), "")
+except Exception as e:
+    check("gmail_modify live", False, str(e)[:200])
+
+# 4n. drive create_file + read_content + trash cycle
+try:
+    st = mod.google_drive_create_file(f"{PREFIX}FILE-{stamp}", "v24 battery probe text")
+    created = commit_ok("drive_create_file committed", st)
+    fid = created["id"]
+    check("drive_create verified", created.get("name", "").startswith(PREFIX), "")
+    body = mod.google_drive_read_content(fid)
+    check("drive_read_content verified", "v24 battery probe" in body.get("text", ""), "")
+    commit_ok("drive_create residue trashed", mod.google_drive_trash(fid))
+except Exception as e:
+    check("drive create/read cycle", False, str(e)[:200])
+
+# 4o. sheets insert_dimension cycle (row count N -> N+1, whole-sheet trash)
+try:
+    st = mod.google_sheets_create(f"{PREFIX}DIM-{stamp}")
+    ss = commit_ok("dim-seed sheet created", st)
+    sid = ss["spreadsheetId"]
+    meta0 = mod.google_sheets_metadata(sid)
+    tab = meta0["sheets"][0]["properties"]
+    n0 = tab["gridProperties"]["rowCount"]
+    commit_ok("insert_dimension committed",
+              mod.google_sheets_insert_dimension(sid, tab["sheetId"], "ROWS", 1, 2))
+    n1 = mod.google_sheets_metadata(sid)["sheets"][0]["properties"]["gridProperties"]["rowCount"]
+    check("insert_dimension verified", n1 == n0 + 1, f"{n0}->{n1}")
+    found = mod.google_drive_search(f"name contains '{PREFIX}DIM-{stamp}'", 5)["items"]
+    for f in found:
+        commit_ok(f"dim-seed {f['id'][:8]} trashed", mod.google_drive_trash(f["id"]))
+except Exception as e:
+    check("sheets insert_dimension cycle", False, str(e)[:200])
+
+# 4p. calendar respond refusal paths on a seeded event (commit path needs an
+# event where the user is a guest, not creatable via the API as organizer)
+try:
+    prof = mod.google_people_profile()
+    self_email = (prof.get("emailAddresses") or [{}])[0].get("value", "")
+    st = mod.google_calendar_create(f"{PREFIX}RSVP-{stamp}", "2026-12-04T00:00:00Z",
+                                    "2026-12-04T01:00:00Z", attendees=self_email)
+    ev = commit_ok("rsvp-seed event created", st)
+    evid = ev["id"]
+    try:
+        mod.google_calendar_respond(evid, "bogus")
+        check("respond bad-value refused", False, "accepted bogus response (bug)")
+    except Exception as e2:
+        check("respond bad-value refused", "accepted/tentative/declined" in str(e2), "")
+    try:
+        mod.google_calendar_respond(evid, "tentative")
+        check("respond non-attendee refused", False, "organizer RSVP applied (bug)")
+    except Exception as e2:
+        check("respond non-attendee refused", "not an attendee" in str(e2), str(e2)[:120])
+    commit_ok("patch attendees+visibility committed",
+              mod.google_calendar_patch(evid, attendees=self_email, visibility="private"))
+    got2 = mod.google_calendar_get(evid)
+    check("patch extension verified", got2.get("visibility") == "private", "")
+    commit_ok("rsvp-seed deleted", mod.google_calendar_delete(evid))
+except Exception as e:
+    check("calendar respond cycle", False, str(e)[:200])
+
+# 4q. chat mark_read -> mark_unread paired commits (ends unread = badge restored).
+# Commits need a Chat app configured in the project; without it the API 404s.
+try:
+    if spaces:
+        try:
+            commit_ok("mark_read committed", mod.google_chat_mark_read(spaces[0]["name"]))
+            commit_ok("mark_unread committed", mod.google_chat_mark_unread(spaces[0]["name"]))
+            check("chat read-state pair live", True, "")
+        except Exception as e2:
+            if "not found" in str(e2).lower() and "chat app" in str(e2).lower():
+                skipped("chat read-state pair live", "no Chat app configured in project")
+            else:
+                raise
+    else:
+        skipped("chat read-state pair live", "no chat spaces visible")
+except Exception as e:
+    check("chat read-state pair live", False, str(e)[:200])
+
+# 4r. docs_update + slides_update E2E (stage, commit, verify content, trash seeds)
+try:
+    st = mod.google_docs_create(f"{PREFIX}DOCUPD-{stamp}", body="Alpha line.\nBeta line.\n")
+    doc = commit_ok("docupd-seed created", st)
+    doc_id = doc["documentId"]
+    st = mod.google_docs_update(doc_id, [{"insertText": {"location": {"index": 1},
+                                                         "text": "TOP. "}}])
+    commit_ok("docs_update committed", st)
+    check("docs_update verified", "TOP." in mod.google_docs_read(doc_id)["text"], "")
+    commit_ok("docupd-seed trashed", mod.google_drive_trash(doc_id))
+except Exception as e:
+    check("docs_update cycle", False, str(e)[:200])
+try:
+    st = mod.google_slides_create(f"{PREFIX}SLDUPD-{stamp}")
+    deck = commit_ok("sldupd-seed created", st)
+    pid = deck["presentationId"]
+    commit_ok("slides_update committed",
+              mod.google_slides_update(pid, [{"createSlide": {"insertionIndex": 1}}]))
+    check("slides_update verified", mod.google_slides_get(pid)["slide_count"] == 2, "")
+    found = mod.google_drive_search(f"name contains '{PREFIX}SLDUPD-{stamp}'", 5)["items"]
+    for f in found:
+        commit_ok(f"sldupd-seed {f['id'][:8]} trashed", mod.google_drive_trash(f["id"]))
+except Exception as e:
+    check("slides_update cycle", False, str(e)[:200])
 
 # ---------------------------------------------------------------- 5. safety semantics
 # double-commit refused

@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.4.0 (2026-09-07) — Docs/Slides staged writers
+
+Non-breaking: 2 new tools (71 to 73), no signature removals. No new scopes,
+no re-auth.
+
+- `google_docs_update`: staged batchUpdate (insertText, deleteContentRange,
+  replaceAllText, updateTextStyle). Allowlist-enforced, 50 requests / 50k chars
+  caps, per-request human summaries, tab-aware index bounds from a fresh fetch,
+  revisionId revalidate + writeControl pin. Empty-find replace refused.
+- `google_slides_update`: staged batchUpdate (createSlide, insertText,
+  deleteText, deleteObject, replaceAllText). Target IDs verified against a
+  fresh fetch at stage; deletes need destructive_acknowledged, deck-wide
+  replace needs deck_wide_acknowledged (else scope pageObjectIds).
+- Honesty note: batches apply sequentially, not atomically. A late failure can
+  leave early requests applied. Both tools say so in checks; keep batches small
+  and single-intent.
+- Infra: `_WRITE_TIMEOUT=60`, batch commits are the first real `_exec`
+  kind=commit consumers; audit scrubber logs request histograms, never text.
+- E2E backfill: v2.3 tools get live cycles (STAR restore, create/read/trash,
+  dimension N to N+1, RSVP refusal paths, read-state pair, writers end to end).
+  Chat read-state commits are environment-gated (need a Chat app configured;
+  battery skips with reason otherwise). `docs_read live` still needs the
+  GW_FIXTURE_DOC_ID fixture (pre-existing).
+- Doc sweep: SKILL matrix/inventory at 73 tools + 4 prompts, 19 scopes;
+  server-inventory tool list rewritten.
+- Deferred again: MCP Tasks extension (Python SDK still ships no runtime),
+  Resources primitive, directory search.
+- Rollback: pin the v2.3 tag and restart the host.
+
 ## v2.3.0 (2026-09-06) — First-party parity + MCP SDK 2.x
 
 Non-breaking: 17 new tools (54 to 71) + 4 prompts, no signature removals.
