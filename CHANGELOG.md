@@ -1,5 +1,63 @@
 # Changelog
 
+## v2.6.0 (2026-11-22) — Drive v3 hardening and timestamp metadata
+
+**BREAKING (Drive-only):** `google_drive_share` no longer permits public link
+sharing merely because `email` is empty. To intentionally create an
+anyone-with-link permission, supply `anyone_with_link_acknowledged=True`.
+Downloaded file basenames are now ID-prefixed to prevent collisions. Existing
+callers that rely on the previous share default or local download filenames
+must migrate. No tools removed, no new OAuth scopes: now 90 tools + 4 prompts (17 Drive additions).
+
+- Drive completion: 3 more tools for staged in-place binary content replacement
+  (new revision, original Drive ID and sharing preserved), read-only pinned
+  binary revision downloads with checksum checks, and staged typed Drive label
+  modifications. Replacements require explicit acknowledgement and revalidate
+  both source bytes and the current Drive file. Historical binary revisions
+  must be marked Keep Forever, either through the UI or the additional staged
+  `google_drive_revision_pin` tool (explicit retention approval; storage and
+  200-pinned-revision limit). Google-native editor revision exports are not
+  covered by this download tool.
+- Drive breadth: 13 additional tools for account/storage capabilities, shared drive
+  discovery, change polling, revision/comment/label reads, staged restoration,
+  shortcut creation, explicit permission revocation, metadata editing and
+  staged comments/replies. No new OAuth scope is required for these methods.
+- Timestamps: staged `google_drive_upload`, `google_drive_create_file` and
+  `google_drive_copy` accept optional RFC 3339 `created_time` and
+  `modified_time` with explicit offsets; `google_drive_update` accepts
+  `modified_time`. Commit responses include the actual timestamps and a
+  comparison to requested instants. Drive metadata does **not** alter
+  upload/activity/audit history.
+- Integrity: pre-generate a Drive file ID before staged binary uploads for
+  retry/ambiguity recovery, and check SHA-256 checksums when supplied by Drive.
+  Existing local downloads are never overwritten; checksum mismatches refuse
+  to publish a local file.
+- Upload: stream SHA-256 instead of loading the entire local file into RAM;
+  revalidate file hash, size, mtime, folder type and destination capability
+  at commit. Preserve resumable media and bounded chunk retries.
+- Sharing: require explicit acknowledgement for public links; validate target
+  and permissions at stage and commit; permissions audit lists all pages.
+- Organize: revalidate versions, names, modified times and parents for copy,
+  move, rename and trash; validate destination folders, infer the source
+  parent on single-parent moves, and refuse to copy folders.
+- Downloads: sanitize local basenames, enforce filesystem-safe length,
+  prepend file ID, download to unique temporary files, and atomically finalize
+  only successful transfers.
+- Shared drives: use `supportsAllDrives`; search/recent can target
+  `drive_id`. Return `incomplete_search` for incomplete Drive list results.
+- Correctness: RFC 3339 offset-minute validation; streamed UTF-8 Drive text
+  pagination without byte/character mismatches; download collisions never
+  overwrite existing user files.
+- Hardening: more bounded `_exec` calls, narrower default metadata
+  projections, nanosecond-accurate timestamp comparisons, fail-closed
+  capability checks, and safely paginated permission snapshots.
+- Verification: offline Drive unit tests added to CI, Python 3.11 and 3.14
+  hygiene checks passed. No authenticated live upload, shared-drive workflow,
+  or Cloud Console inspection performed for this release PR.
+- Migration / Cloud Console audit: `docs/DRIVE-HARDENING.md`.
+- Rollback: pin the `v2.5` tag and restart the MCP host. Existing staged
+  operations are per-process and will be discarded on restart.
+
 ## v2.5.0 (2026-09-07) — Efficiency: parallel fan-outs, keep-alive, tighter reads
 
 Non-breaking: no new tools, no signature changes, no new scopes. Same 73 tools

@@ -31,12 +31,12 @@ The Hermes profile runs a Google Workspace MCP server (`google-workspace`) authe
 - Scope source of truth: canonical `setup/setup.py` SCOPES list (also the auth tool: `--auth-url` / `--auth-code` / `--check`)
 - Tests: canonical `setup/tests/verify_server.py` (quick) + `test_server.py` (full E2E) — run with `HERMES_HOME` set to the state home
 
-## Service matrix (11 services, 73 tools + 4 prompts - v2.3 envelopes, see MIGRATION-v2.md)
+## Service matrix (11 services, 90 tools + 4 prompts - v2.6 Drive hardening, see DRIVE-HARDENING.md)
 
 | Service | API to enable (console) | Scope | Tools |
 |---|---|---|---|
 | sheets v4 | Sheets API | spreadsheets | metadata, read, update, append, create, conditional_formats |
-| drive v3 | Drive API | drive | search, get, download, upload, create_folder, share, trash, permissions, copy, update |
+| drive v3 | Drive API | drive | search, get, recent, read_content, download, upload, create_file, create_folder, share, trash, permissions, copy, update; about, shared_drives, changes_start, changes, revisions, comments, file_labels, restore, shortcut, permission_remove, metadata_update, comment_create, comment_reply, replace_content, revision_download, label_modify, revision_pin |
 | docs v1 | Docs API | documents | read, create, append, update |
 | forms v1 | Forms API | forms.body, forms.responses.readonly | list, get, responses |
 | gmail v1 | Gmail API | gmail.readonly, gmail.send, gmail.modify | search, get, thread_get, attachment_download, send |
@@ -62,11 +62,13 @@ Console enable link pattern: `https://console.cloud.google.com/apis/api/<api>.go
 
 ## Write safety: staged-write protocol (2026-08-11)
 
+v2.6 Drive migration: public-link sharing requires explicit `anyone_with_link_acknowledged=True`. Downloads are ID-prefixed, and upload/copy/create support custom timestamps. See [DRIVE-HARDENING.md](DRIVE-HARDENING.md).
+
 No google_* write tool touches Google directly. Each one STAGES: it snapshots the current state, runs deterministic checks, and returns `operation_id` + `preview` + `checks` WITHOUT applying. The agent reviews the preview, then applies via `google_write_commit(operation_id)` (single-use; revalidates live state first — e.g. refuses if the range/event/task changed since staging) or discards via `google_write_cancel(operation_id)`. `google_write_list_staged()` shows pending ops. Read tools are never gated.
 
 Hardening (2026-08-11): `google_write_commit` **fails closed in cron** (`HERMES_CRON_SESSION` set → blocked unless `HERMES_ALLOW_CRON_WRITES=1`); staged ops **expire after 24h** and cap at **20 concurrent**; commits are logged to `<HERMES_HOME>/logs/google-write-audit.jsonl` by both the server and the `google-write-guard` plugin (audit-only, no prompts).
 
-**Testing:** `setup/tests/test_server.py` is the full battery (71 tools + 4 prompts, live reads across services, E2E stage→commit→verify→cleanup per write tool with `GW-TEST-` artifacts, double-commit/cron/TTL/cap semantics, audit growth). `setup/tests/verify_server.py` is the quick 5-check battery. Run both after every server change.
+**Testing:** `setup/tests/test_server.py` is the full battery (90 tools + 4 prompts, live reads across services, E2E stage→commit→verify→cleanup per write tool with `GW-TEST-` artifacts, double-commit/cron/TTL/cap semantics, audit growth). `setup/tests/verify_server.py` is the quick 5-check battery. Run both after every server change.
 
 **MAINTENANCE RULE: when adding a write tool to server.py, (1) implement it with the `_stage(...)` pattern (apply_fn + checks + preview + optional revalidate), (2) add its name to `AUDITED_TOOLS` in the plugin, (3) add it to both test scripts' expected tool sets, (4) run `test_server.py`.**
 
@@ -85,7 +87,7 @@ Hardening (2026-08-11): `google_write_commit` **fails closed in cron** (`HERMES_
 
 ## Verification
 
-Run `setup/tests/verify_server.py` with the .venv python (`env -u PYTHONPATH`). Expected: 73 tools + 4 prompts registered, calendar list + people contacts + tasks lists PASS live (all 19 scopes granted 2026-09-06). Extend the script when adding tools.
+Run `setup/tests/verify_server.py` with the .venv python (`env -u PYTHONPATH`). Expected: 90 tools + 4 prompts registered, calendar list + people contacts + tasks lists PASS live (all 19 scopes granted 2026-09-06). Extend the script when adding tools.
 
 ## User preference
 

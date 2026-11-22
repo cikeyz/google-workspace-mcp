@@ -24,12 +24,12 @@ Console link pattern: `https://console.cloud.google.com/apis/api/<api>.googleapi
 
 All read tools now return FULL API payloads (question types/required/validation/options, event attendees, message headers+labels+attachments, raw person resources, etc.) instead of hand-picked subsets. Exceptions: `google_docs_read` (structured text extraction + revisionId), `google_slides_get` (per-slide text/notes/element inventory), `google_gmail_get` body (plain-text extraction, html truncated at 2000 chars) — raw payloads there are too large to be useful. `google_drive_download` is inherently a local-file tool. Write tools return the full created/updated resource.
 
-## Full tool inventory (73 + 4 prompts, v2.4; v2.1 envelope breaking change, see MIGRATION-v2.md)
+## Full tool inventory (90 + 4 prompts, v2.6; v2.1 envelope breaking change, see MIGRATION-v2.md)
 
 - `google_auth_status`
 - Staged-write controls: `google_write_commit`, `google_write_cancel`, `google_write_list_staged`
 - Sheets: `google_sheets_metadata`, `google_sheets_read`, `google_sheets_update`, `google_sheets_append`, `google_sheets_create`, `google_sheets_insert_dimension`, `google_sheets_conditional_formats`
-- Drive: `google_drive_search` (full query syntax!), `google_drive_get`, `google_drive_recent`, `google_drive_read_content`, `google_drive_download`, `google_drive_upload`, `google_drive_create_file`, `google_drive_create_folder`, `google_drive_share`, `google_drive_trash`, `google_drive_permissions`, `google_drive_copy`, `google_drive_update`
+- Drive: `google_drive_search` (full query syntax!), `google_drive_get`, `google_drive_recent`, `google_drive_read_content`, `google_drive_download`, `google_drive_upload`, `google_drive_create_file`, `google_drive_create_folder`, `google_drive_share`, `google_drive_trash`, `google_drive_permissions`, `google_drive_copy`, `google_drive_update`, `google_drive_about`, `google_drive_shared_drives`, `google_drive_changes_start`, `google_drive_changes`, `google_drive_revisions`, `google_drive_comments`, `google_drive_file_labels`, `google_drive_restore`, `google_drive_shortcut`, `google_drive_permission_remove`, `google_drive_metadata_update`, `google_drive_comment_create`, `google_drive_comment_reply`, `google_drive_replace_content`, `google_drive_revision_download`, `google_drive_label_modify`, `google_drive_revision_pin`
 - Docs: `google_docs_read`, `google_docs_create`, `google_docs_append`, `google_docs_update`
 - Forms: `google_forms_list`, `google_forms_get`, `google_forms_responses`
 - Gmail: `google_gmail_search`, `google_gmail_search_threads`, `google_gmail_get`, `google_gmail_thread_get`, `google_gmail_attachment_download`, `google_gmail_send`, `google_gmail_labels_list`, `google_gmail_modify_labels`
@@ -41,6 +41,14 @@ All read tools now return FULL API payloads (question types/required/validation/
 - Meet: `google_meet_create_space`, `google_meet_get_space`
 - Universal: `google_universal_search`
 - Prompts: `triage_inbox`, `prep_meeting_brief`, `summarize_thread`, `find_anything`
+
+## v2.6 Drive changes
+
+- Optional RFC 3339 timestamps on staged upload, copy, and inline file creation; modification timestamps on updates.
+- Explicit opt-in for anyone-with-link sharing; collision-safe ID-prefixed downloads.
+- Stronger validation of destination folders, file snapshots, version and permissions at commit.
+- Shared-drive-aware reads/writes, drive-scoped searching and safer permission pagination.
+- No extra OAuth scopes; see [DRIVE-HARDENING.md](../DRIVE-HARDENING.md) for migration, live verification and Cloud Console checklist.
 
 ## Field notes (errors seen & their real causes)
 
