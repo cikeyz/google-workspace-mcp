@@ -258,7 +258,8 @@ except Exception as e:
 try:
     st = mod.google_drive_create_folder(f"{PREFIX}SHARE-{stamp}")
     folder = commit_ok("share-target folder create committed", st)
-    sh = mod.google_drive_share(folder["id"], email="", role="reader")
+    sh = mod.google_drive_share(folder["id"], email="", role="reader",
+                                 anyone_with_link_acknowledged=True)
     perm = commit_ok("drive_share committed", sh)
     check("drive_share permission verified", perm.get("id") is not None)
     commit_ok("share-target folder trash committed", mod.google_drive_trash(folder["id"]))
