@@ -2,7 +2,7 @@
 
 Reviewed against the official Google Drive API v3 and Google Auth Platform
 documentation on **2026-11-22**. This guide applies to the Python MCP server
-in \`server.py\`, not to ChatGPT's separate Google Drive connector.
+in `server.py`, not to ChatGPT's separate Google Drive connector.
 
 ## Google Cloud Console checklist
 
@@ -14,10 +14,10 @@ in \`server.py\`, not to ChatGPT's separate Google Drive connector.
    app's audience, consent screen, and requested scope. For a personal local
    app, use the narrowest scopes that meet your requirements.
 4. The existing full-Workspace toolset requests
-   \`https://www.googleapis.com/auth/drive\` in \`setup/setup.py\`.
+   `https://www.googleapis.com/auth/drive` in `setup/setup.py`.
    No additional OAuth scope is required for timestamp metadata or for the
    changed Drive v3 operations. **This is a restricted scope**. A focused
-   uploader may instead use \`drive.file\`, which grants access to files
+   uploader may instead use `drive.file`, which grants access to files
    created/opened by the app. That cannot transparently replace broad
    Drive access required by this MCP's search/administrative features.
 5. Review the OAuth client's application type and credentials. Never check in
@@ -37,30 +37,30 @@ settings match the documentation.
 
 ## Upload preserving creation/modification dates
 
-\`google_drive_upload\` now accepts optional \`created_time\` and
-\`modified_time\` parameters, for example:
+`google_drive_upload` now accepts optional `created_time` and
+`modified_time` parameters, for example:
 
-\`\`\`text
+```text
 local_path: C:\Users\USER\Documents\report.pdf
 name: report.pdf
 created_time: 2026-09-15T10:30:00+08:00
 modified_time: 2026-09-15T10:30:00+08:00
-\`\`\`
+```
 
 Both values **must** be RFC 3339 timestamps with explicit time zone offsets.
 The tool only **stages** the upload; review the preview, then call
-\`google_write_commit(operation_id)\`. It checks the local file hash again
+`google_write_commit(operation_id)`. It checks the local file hash again
 using streaming reads (bounded memory), rechecks the destination folder, and
 performs a resumable upload.
 
-The commit returns \`createdTime\` and \`modifiedTime\` from the API along
-with \`timestamp_verification\`, comparing instants even if Google renders
+The commit returns `createdTime` and `modifiedTime` from the API along
+with `timestamp_verification`, comparing instants even if Google renders
 them in UTC. Always inspect the **actual** returned timestamps rather than
 assuming Google accepted a requested value.
 
-\`google_drive_create_file\` and \`google_drive_copy\` also accept creation
-and modification timestamps. \`google_drive_update\` supports updating
-\`modified_time\`, **not** an existing file's \`createdTime\`.
+`google_drive_create_file` and `google_drive_copy` also accept creation
+and modification timestamps. `google_drive_update` supports updating
+`modified_time`, **not** an existing file's `createdTime`.
 
 **Important:** Drive metadata is not the same as the actual date an upload
 occurred. The Drive Activity API, event logs, and audit records may expose
@@ -73,22 +73,22 @@ the real operation date. This feature is not an audit-history editor.
 - **Safer downloads:** sanitized, ID-prefixed names; unique temporary files;
   failed downloads do not leave completed-looking partial files.
 - **Explicit public sharing:** passing no email now refuses to stage unless
-  \`anyone_with_link_acknowledged=True\` is provided. This is an intentional
+  `anyone_with_link_acknowledged=True` is provided. This is an intentional
   breaking safety change; audit existing agent prompts and E2E test scripts.
 - **Stronger staged writes:** copies, renames, moves, trash, and shares
   revalidate their target state before commit. A conflict requires re-staging.
-- **Shared drives:** Drive requests use \`supportsAllDrives=True\`.
-  Searches and recent-file reads include shared-drive items; pass \`drive_id\`
+- **Shared drives:** Drive requests use `supportsAllDrives=True`.
+  Searches and recent-file reads include shared-drive items; pass `drive_id`
   to search a particular shared drive.
 - **Pagination:** permissions list pages until complete, bounded by a safety
-  limit. \`google_drive_search\` and \`google_drive_recent\` return
-  \`incomplete_search\` to expose incomplete Drive result sets.
+  limit. `google_drive_search` and `google_drive_recent` return
+  `incomplete_search` to expose incomplete Drive result sets.
 - **Metadata scope:** ordinary operations request selected fields; full
-  read tools still support \`full=True\` for debugging.
+  read tools still support `full=True` for debugging.
 
 ## Limits and deliberate exclusions
 
-- The main MCP runs on the machine where its \`local_path\` exists. A remote
+- The main MCP runs on the machine where its `local_path` exists. A remote
   MCP server cannot read an arbitrary path on a user's laptop.
 - Google-native exports have format/size restrictions; binary downloads and
   exports are separate operations.
@@ -107,12 +107,12 @@ the real operation date. This feature is not an audit-history editor.
 
 Offline regression tests:
 
-\`\`\`sh
+```sh
 python -m unittest discover -s setup/tests -p test_drive_unit.py -v
-\`\`\`
+```
 
 CI installs the pinned Python dependencies and runs these without
-connecting to Google. The separate \`setup/tests/test_server.py\` exercises
+connecting to Google. The separate `setup/tests/test_server.py` exercises
 real Workspace APIs and must only be run deliberately with disposable
 fixtures and explicit credentials; it is not executed in public CI.
 
