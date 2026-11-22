@@ -1,5 +1,40 @@
 # Changelog
 
+## v2.6.0 (2026-11-22) — Drive v3 hardening and timestamp metadata
+
+**BREAKING (Drive-only):** `google_drive_share` no longer permits public link
+sharing merely because `email` is empty. To intentionally create an
+anyone-with-link permission, supply `anyone_with_link_acknowledged=True`.
+Downloaded file basenames are now ID-prefixed to prevent collisions. Existing
+callers that rely on the previous share default or local download filenames
+must migrate. No tools removed, no new OAuth scopes: still 73 tools + 4 prompts.
+
+- Timestamps: staged `google_drive_upload`, `google_drive_create_file` and
+  `google_drive_copy` accept optional RFC 3339 `created_time` and
+  `modified_time` with explicit offsets; `google_drive_update` accepts
+  `modified_time`. Commit responses include the actual timestamps and a
+  comparison to requested instants. Drive metadata does **not** alter
+  upload/activity/audit history.
+- Upload: stream SHA-256 instead of loading the entire local file into RAM;
+  revalidate file hash, size, mtime, folder type and destination capability
+  at commit. Preserve resumable media and bounded chunk retries.
+- Sharing: require explicit acknowledgement for public links; validate target
+  and permissions at stage and commit; permissions audit lists all pages.
+- Organize: revalidate versions, names, modified times and parents for copy,
+  move, rename and trash; validate destination folders.
+- Downloads: sanitize local basenames, prepend file ID, download to unique
+  temporary files, and atomically finalize only successful transfers.
+- Shared drives: use `supportsAllDrives`; search/recent can target
+  `drive_id`. Return `incomplete_search` for incomplete Drive list results.
+- Hardening: more bounded `_exec` calls, narrower default metadata
+  projections, validated Drive timestamps and safer file operations.
+- Verification: offline Drive unit tests added to CI, Python 3.11 and 3.14
+  hygiene checks passed. No authenticated live upload, shared-drive workflow,
+  or Cloud Console inspection performed for this release PR.
+- Migration / Cloud Console audit: `docs/DRIVE-HARDENING.md`.
+- Rollback: pin the `v2.5` tag and restart the MCP host. Existing staged
+  operations are per-process and will be discarded on restart.
+
 ## v2.5.0 (2026-09-07) — Efficiency: parallel fan-outs, keep-alive, tighter reads
 
 Non-breaking: no new tools, no signature changes, no new scopes. Same 73 tools
