@@ -24,7 +24,7 @@ Console link pattern: `https://console.cloud.google.com/apis/api/<api>.googleapi
 
 All read tools now return FULL API payloads (question types/required/validation/options, event attendees, message headers+labels+attachments, raw person resources, etc.) instead of hand-picked subsets. Exceptions: `google_docs_read` (structured text extraction + revisionId), `google_slides_get` (per-slide text/notes/element inventory), `google_gmail_get` body (plain-text extraction, html truncated at 2000 chars) — raw payloads there are too large to be useful. `google_drive_download` is inherently a local-file tool. Write tools return the full created/updated resource.
 
-## Full tool inventory (73 + 4 prompts, v2.4; v2.1 envelope breaking change, see MIGRATION-v2.md)
+## Full tool inventory (73 + 4 prompts, v2.6; v2.1 envelope breaking change, see MIGRATION-v2.md)
 
 - `google_auth_status`
 - Staged-write controls: `google_write_commit`, `google_write_cancel`, `google_write_list_staged`
@@ -41,6 +41,14 @@ All read tools now return FULL API payloads (question types/required/validation/
 - Meet: `google_meet_create_space`, `google_meet_get_space`
 - Universal: `google_universal_search`
 - Prompts: `triage_inbox`, `prep_meeting_brief`, `summarize_thread`, `find_anything`
+
+## v2.6 Drive changes
+
+- Optional RFC 3339 timestamps on staged upload, copy, and inline file creation; modification timestamps on updates.
+- Explicit opt-in for anyone-with-link sharing; collision-safe ID-prefixed downloads.
+- Stronger validation of destination folders, file snapshots, version and permissions at commit.
+- Shared-drive-aware reads/writes, drive-scoped searching and safer permission pagination.
+- No extra OAuth scopes; see [DRIVE-HARDENING.md](../DRIVE-HARDENING.md) for migration, live verification and Cloud Console checklist.
 
 ## Field notes (errors seen & their real causes)
 
