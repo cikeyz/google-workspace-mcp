@@ -760,6 +760,16 @@ def _drive_live_file(meta: dict, capability: str = "") -> None:
         raise RuntimeError(f"Drive denies {capability} on this file.")
 
 
+def _drive_commit_once(req):
+    """Never blindly retry non-idempotent create/copy/share requests.
+
+    A timeout or even a server error after processing may leave a created
+    resource behind. The caller should inspect Drive before staging again.
+    """
+    http = AuthorizedHttp(_get_creds(), http=_shared_http(_WRITE_TIMEOUT))
+    return req.execute(http=http, num_retries=0)
+
+
 def _drive_snapshot(meta: dict) -> tuple:
     """Include version to catch metadata changes even when timestamps are preserved."""
     return (meta.get("version"), meta.get("modifiedTime"),
@@ -935,9 +945,8 @@ def google_drive_create_folder(name: str, parent_folder_id: str = "") -> dict:
         body = {"name": name, "mimeType": _DRIVE_FOLDER_MIME}
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
-        return _exec(_svc("drive", "v3").files().create(
-            body=body, fields=_DRIVE_FIELDS, supportsAllDrives=True),
-            kind="commit", timeout=_WRITE_TIMEOUT)
+        return _drive_commit_once(_svc("drive", "v3").files().create(
+            body=body, fields=_DRIVE_FIELDS, supportsAllDrives=True))
 
     def revalidate():
         _drive_parent(parent_folder_id)
@@ -978,9 +987,9 @@ def google_drive_share(file_id: str, email: str = "", role: str = "reader",
         body = {"role": role, "type": "user" if email else "anyone"}
         if email:
             body["emailAddress"] = email
-        return _exec(d.permissions().create(
+        return _drive_commit_once(d.permissions().create(
             fileId=file_id, body=body, fields="id,type,role,emailAddress",
-            supportsAllDrives=True), kind="commit", timeout=_WRITE_TIMEOUT)
+            supportsAllDrives=True))
 
     def revalidate():
         _drive_live_file(_drive_file(file_id), "canShare")
@@ -2134,9 +2143,9 @@ def google_drive_copy(file_id: str, name: str = "", parent_folder_id: str = "",
             body["name"] = name
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
-        result = _exec(_svc("drive", "v3").files().copy(
+        result = _drive_commit_once(_svc("drive", "v3").files().copy(
             fileId=file_id, body=body, fields=_DRIVE_FIELDS,
-            supportsAllDrives=True), kind="commit", timeout=_WRITE_TIMEOUT)
+            supportsAllDrives=True))
         if timestamps:
             result["timestamp_verification"] = _drive_timestamp_verification(timestamps, result)
         return result
