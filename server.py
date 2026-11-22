@@ -713,205 +713,315 @@ def google_sheets_create(title: str, sheet_name: str = "Sheet1", locale: str = "
 
 # ---------------------------------------------------------------- Drive
 
+_DRIVE_FIELDS = ("id,name,mimeType,size,createdTime,modifiedTime,trashed,"
+                 "parents,webViewLink,md5Checksum,version")
+_DRIVE_LIST_FIELDS = (
+    "nextPageToken,incompleteSearch,files(id,name,mimeType,size,createdTime,"
+    "modifiedTime,trashed,parents,owners(displayName,emailAddress),webViewLink,"
+    "capabilities(canDownload))"
+)
+_DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+
+
+def _drive_page_size(value: int) -> int:
+    if value < 1:
+        raise ValueError("max_results must be a positive integer.")
+    return min(value, 1000)
+
+
+def _drive_parent(parent_folder_id: str) -> dict | None:
+    """Verify a destination is a live folder and the user can add children."""
+    if not parent_folder_id:
+        return None
+    d = _svc("drive", "v3")
+    folder = _exec(d.files().get(
+        fileId=parent_folder_id, supportsAllDrives=True,
+        fields="id,name,mimeType,trashed,capabilities(canAddChildren)"),
+        kind="read")
+    if folder.get("trashed") or folder.get("mimeType") != _DRIVE_FOLDER_MIME:
+        raise RuntimeError(f"Drive destination {parent_folder_id} is not an active folder.")
+    if (folder.get("capabilities") or {}).get("canAddChildren") is False:
+        raise RuntimeError(f"No permission to add files to folder {parent_folder_id}.")
+    return folder
+
+
+def _drive_file(file_id: str, fields: str = "") -> dict:
+    return _exec(_svc("drive", "v3").files().get(
+        fileId=file_id, supportsAllDrives=True,
+        fields=fields or "id,name,mimeType,trashed,version,modifiedTime,parents,"
+                         "capabilities(canEdit,canCopy,canShare,canTrash)"),
+        kind="read")
+
+
+def _drive_live_file(meta: dict, capability: str = "") -> None:
+    if meta.get("trashed"):
+        raise RuntimeError("Target file is trashed; stage the operation again.")
+    if capability and (meta.get("capabilities") or {}).get(capability) is False:
+        raise RuntimeError(f"Drive denies {capability} on this file.")
+
+
+def _drive_snapshot(meta: dict) -> tuple:
+    """Include version to catch metadata changes even when timestamps are preserved."""
+    return (meta.get("version"), meta.get("modifiedTime"),
+            meta.get("name"), tuple(meta.get("parents") or ()))
+
+
+def _drive_timestamp_metadata(created_time: str = "", modified_time: str = "") -> dict:
+    from drive_safety import validate_drive_timestamp
+    body = {}
+    if created_time:
+        body["createdTime"] = validate_drive_timestamp(created_time, "created_time")
+    if modified_time:
+        body["modifiedTime"] = validate_drive_timestamp(modified_time, "modified_time")
+    return body
+
+
+def _drive_timestamp_verification(requested: dict, actual: dict) -> dict:
+    from drive_safety import timestamps_match
+    return {key: {
+        "requested": value,
+        "actual": actual.get(key),
+        "matches": timestamps_match(value, actual.get(key, "")),
+    } for key, value in requested.items() if key in {"createdTime", "modifiedTime"}}
+
+
 @mcp.tool(title='Search Drive', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_drive_search(query: str = "", max_results: int = 10, page_token: str = "",
-                        full: bool = False) -> dict:
-    """Search Drive files. query is a Drive API query (e.g. "name contains 'NDA'"), empty = recent files.
-    Returns an envelope {items, next_page_token, has_more, result_count} of file resources
-    (id, name, mimeType, size, createdTime, modifiedTime, trashed, capabilities, owners,
-    parents, webViewLink, ...). full=True returns complete File resources. Feed
-    next_page_token back as page_token."""
+                        full: bool = False, drive_id: str = "") -> dict:
+    """Search Drive, optionally limiting results to one shared drive via drive_id.
+    Returns items, next_page_token, has_more, incomplete_search and result_count.
+    Supply a Drive API query, not a natural-language query."""
     d = _svc("drive", "v3")
-    q = query or None
-    fields = ("nextPageToken,files(*)" if full else
-              "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,"
-              "trashed,parents,owners(displayName,emailAddress),webViewLink,"
-              "capabilities(canDownload))")
-    resp = _exec(d.files().list(
-        q=q, pageSize=min(max_results, 1000), fields=fields,
-        orderBy="modifiedTime desc", pageToken=_check_page_token(page_token) or None,
-    ), kind="read")
+    params = dict(q=query or None, pageSize=_drive_page_size(max_results),
+                  fields="nextPageToken,incompleteSearch,files(*)" if full else _DRIVE_LIST_FIELDS,
+                  orderBy="modifiedTime desc", pageToken=_check_page_token(page_token) or None,
+                  supportsAllDrives=True, includeItemsFromAllDrives=True)
+    if drive_id:
+        params.update(corpora="drive", driveId=drive_id)
+    resp = _exec(d.files().list(**params), kind="read")
     items = resp.get("files", [])
     token = resp.get("nextPageToken") or ""
     return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "incomplete_search": bool(resp.get("incompleteSearch")),
             "result_count": len(items)}
 
 
 @mcp.tool(title='Get Drive File Metadata', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_drive_get(file_id: str, full: bool = False) -> dict:
-    """Get the metadata resource for one Drive file or folder by ID. full=False returns the
-    decision-useful subset (identity, size, times, sharing, capabilities); full=True returns
-    the complete File resource."""
+    """Return Drive file metadata; full=True requests all fields explicitly."""
     d = _svc("drive", "v3")
-    if full:
-        return _exec(d.files().get(fileId=file_id, fields="*"), kind="read")
     return _exec(d.files().get(
-        fileId=file_id,
-        fields="id,name,mimeType,size,createdTime,modifiedTime,trashed,parents,"
+        fileId=file_id, supportsAllDrives=True,
+        fields="*" if full else
+               "id,name,mimeType,size,createdTime,modifiedTime,trashed,parents,"
                "owners(displayName,emailAddress),webViewLink,webContentLink,shared,"
-               "capabilities(canDownload,canEdit),"
+               "capabilities(canDownload,canEdit,canShare),"
                "permissions(type,role,emailAddress)"), kind="read")
 
 
 @mcp.tool(title='Download Drive File', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_drive_download(file_id: str, export_mime: str = "") -> dict:
-    """Download a Drive file to the local download dir. Google-native files export
-    (export_mime overrides, e.g. 'application/pdf', 'text/plain', 'text/csv'); binaries download as-is.
-    Returns local path, name, mimeType, size, and exported bool."""
+    """Download/export a Drive file to an ID-prefixed local path.
+    Download to a unique .part file and rename atomically only on success."""
+    from drive_safety import safe_drive_download_name
     d = _svc("drive", "v3")
-    meta = d.files().get(fileId=file_id, fields="name,mimeType").execute()
+    meta = _drive_file(file_id, "id,name,mimeType,trashed,capabilities(canDownload)")
+    _drive_live_file(meta, "canDownload")
     name = meta.get("name", file_id)
     mime = meta.get("mimeType", "")
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    safe = "".join(c for c in name if c not in '\\/:*?"<>|').strip() or file_id
+    safe = safe_drive_download_name(name, file_id)
     if mime.startswith("application/vnd.google-apps"):
         target = export_mime or {
             "application/vnd.google-apps.document": "application/pdf",
             "application/vnd.google-apps.spreadsheet": "text/csv",
-            "application/vnd.google-apps.slides": "application/pdf",
+            "application/vnd.google-apps.presentation": "application/pdf",
             "application/vnd.google-apps.drawing": "image/png",
-        }.get(mime, "application/pdf")
-        ext = {  # noqa: SIM115 - mapping only
+        }.get(mime)
+        if not target:
+            raise RuntimeError(f"Cannot export Google-native MIME type {mime}.")
+        ext = {
             "application/pdf": "pdf", "text/plain": "txt", "text/csv": "csv",
-            "image/png": "png", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+            "image/png": "png",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
         }.get(target, "bin")
         out = DOWNLOAD_DIR / f"{safe}.{ext}"
         req = d.files().export_media(fileId=file_id, mimeType=target)
     else:
         out = DOWNLOAD_DIR / safe
-        req = d.files().get_media(fileId=file_id)
-    downloader = MediaIoBaseDownload(io.FileIO(str(out), "wb"), req, chunksize=8 * 1024 * 1024)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    return {"path": str(out), "name": name, "mimeType": mime, "size": out.stat().st_size,
-            "exported": mime.startswith("application/vnd.google-apps")}
+        req = d.files().get_media(fileId=file_id, supportsAllDrives=True)
+    temp = out.with_name(f"{out.name}.part.{secrets.token_hex(6)}")
+    try:
+        with io.FileIO(str(temp), "wb") as stream:
+            downloader = MediaIoBaseDownload(stream, req, chunksize=8 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk(num_retries=3)
+        os.replace(temp, out)
+    finally:
+        temp.unlink(missing_ok=True)
+    return {"path": str(out), "name": name, "mimeType": mime,
+            "size": out.stat().st_size, "exported": mime.startswith("application/vnd.google-apps")}
 
 
 @mcp.tool(title='Upload to Drive (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_drive_upload(local_path: str, name: str = "", parent_folder_id: str = "") -> dict:
-    """STAGED write: upload a local file to Drive (optionally into a folder).
-    Returns a preview (file, target name, parent) + operation_id; apply with google_write_commit."""
-    p = Path(local_path)
-    if not p.exists():
-        raise RuntimeError(f"Local file not found: {local_path}")
-    digest = hashlib.sha256(p.read_bytes()).hexdigest()
-    size = p.stat().st_size
-    mtime = p.stat().st_mtime
-    if parent_folder_id:
-        try:
-            parent = _svc("drive", "v3").files().get(
-                fileId=parent_folder_id, fields="id,name,mimeType,trashed").execute()
-            if parent.get("trashed"):
-                raise RuntimeError(f"Parent folder {parent_folder_id} is trashed.")
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"Parent folder {parent_folder_id} not accessible: {exc}") from exc
+def google_drive_upload(local_path: str, name: str = "", parent_folder_id: str = "",
+                        created_time: str = "", modified_time: str = "") -> dict:
+    """STAGE a resumable upload. Optional RFC 3339 timestamps require an offset.
+    Commit validates the file and destination again; response reports actual dates.
+    These metadata dates do NOT alter Google Drive activity/audit history."""
+    import mimetypes
+    from drive_safety import sha256_file
+    p = Path(local_path).expanduser()
+    if not p.is_file():
+        raise RuntimeError(f"Local file not found or not a regular file: {local_path}")
+    if not (name or p.name).strip():
+        raise ValueError("Drive filename must be non-empty.")
+    timestamps = _drive_timestamp_metadata(created_time, modified_time)
+    parent = _drive_parent(parent_folder_id)
+    digest = sha256_file(p)
+    stat = p.stat()
+    size, mtime_ns = stat.st_size, stat.st_mtime_ns
+    target_name = name or p.name
 
     def apply():
         d = _svc("drive", "v3")
-        body = {"name": name or p.name}
+        body = {"name": target_name, **timestamps}
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
-        media = MediaFileUpload(str(p), resumable=True, chunksize=8 * 1024 * 1024)
-        req = d.files().create(body=body, media_body=media, fields="*")
-        resp = None
-        while resp is None:
-            _, resp = req.next_chunk()
-        return resp
+        mime = mimetypes.guess_type(target_name)[0] or "application/octet-stream"
+        media = MediaFileUpload(str(p), mimetype=mime, resumable=True,
+                                chunksize=8 * 1024 * 1024)
+        req = d.files().create(body=body, media_body=media,
+                               fields=_DRIVE_FIELDS, supportsAllDrives=True)
+        result = None
+        while result is None:
+            _, result = req.next_chunk(num_retries=3)
+        if timestamps:
+            result["timestamp_verification"] = _drive_timestamp_verification(timestamps, result)
+        return result
 
     def revalidate():
-        if not p.exists():
-            raise RuntimeError(f"Local file disappeared since staging: {local_path}")
-        if hashlib.sha256(p.read_bytes()).hexdigest() != digest or p.stat().st_mtime != mtime:
-            raise RuntimeError("Local file changed since staging; refusing to upload. Re-stage.")
+        if not p.is_file():
+            raise RuntimeError("Local file disappeared before commit; stage again.")
+        current = p.stat()
+        if (current.st_size != size or current.st_mtime_ns != mtime_ns
+                or sha256_file(p) != digest):
+            raise RuntimeError("Local file changed after staging; stage again.")
+        if parent_folder_id:
+            _drive_parent(parent_folder_id)
 
-    return _stage("google_drive_upload", {"local_path": local_path, "name": name or p.name,
-                                          "parent_folder_id": parent_folder_id},
-                  apply, [f"local file exists ({size} bytes, sha256:{digest[:16]})"],
-                  {"local_path": str(p), "target_name": name or p.name,
+    return _stage("google_drive_upload",
+                  {"local_path": str(p), "name": target_name,
+                   "parent_folder_id": parent_folder_id,
+                   "created_time": created_time, "modified_time": modified_time},
+                  apply,
+                  [f"regular local file ({size} bytes, sha256:{digest[:16]})",
+                   "destination folder verified" if parent else "upload to My Drive root",
+                   "custom timestamps validated" if timestamps else "Drive default timestamps"],
+                  {"local_path": str(p), "target_name": target_name,
                    "parent_folder_id": parent_folder_id, "size": size,
-                   "sha256": digest[:16]}, revalidate)
+                   "sha256": digest[:16], "requested_timestamps": timestamps}, revalidate)
 
 
 @mcp.tool(title='Create Drive Folder (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 def google_drive_create_folder(name: str, parent_folder_id: str = "") -> dict:
-    """STAGED write: create a Drive folder (optionally inside another folder).
-    Returns a preview + operation_id; apply with google_write_commit."""
-    d = _svc("drive", "v3")
+    """STAGE folder creation; validate the parent at stage and again at commit."""
+    if not name.strip():
+        raise ValueError("Folder name must be non-empty.")
+    _drive_parent(parent_folder_id)
 
     def apply():
-        body = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+        body = {"name": name, "mimeType": _DRIVE_FOLDER_MIME}
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
-        return d.files().create(body=body, fields="*").execute()
-
-    return _stage("google_drive_create_folder", {"name": name, "parent_folder_id": parent_folder_id},
-                  apply, ["name non-empty"], {"name": name, "parent_folder_id": parent_folder_id}, None)
-
-
-@mcp.tool(title='Share Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
-def google_drive_share(file_id: str, email: str = "", role: str = "reader") -> dict:
-    """STAGED write: share a Drive file. email empty = anyone with the link; role: reader/writer/commenter.
-    Returns a preview (current permissions) + operation_id; apply with google_write_commit.
-    Refuses to commit if the file disappeared since staging."""
-    d = _svc("drive", "v3")
-    if role not in {"reader", "writer", "commenter"}:
-        raise RuntimeError(f"Invalid role '{role}'; use reader, writer, or commenter.")
-    try:
-        existing = _svc("drive", "v3").permissions().list(
-            fileId=file_id,
-            fields="permissions(id,type,role,emailAddress,displayName,expirationTime,"
-                   "deleted,pendingOwner)").execute()
-    except Exception as exc:
-        raise RuntimeError(f"File {file_id} not accessible: {exc}") from exc
-
-    def apply():
-        d = _svc("drive", "v3")
-        body = {"role": role, "type": "anyone" if not email else "user"}
-        if email:
-            body["emailAddress"] = email
-        return d.permissions().create(fileId=file_id, body=body, fields="*").execute()
+        return _exec(_svc("drive", "v3").files().create(
+            body=body, fields=_DRIVE_FIELDS, supportsAllDrives=True),
+            kind="commit", timeout=_WRITE_TIMEOUT)
 
     def revalidate():
-        cur = _svc("drive", "v3").files().get(fileId=file_id, fields="id,trashed").execute()
-        if cur.get("trashed"):
-            raise RuntimeError(f"File {file_id} is trashed; refusing to share. Re-stage.")
+        _drive_parent(parent_folder_id)
 
-    return _stage("google_drive_share", {"file_id": file_id, "email": email, "role": role},
-                  apply, ["role valid", "file exists and is accessible"],
-                  {"file_id": file_id, "new_permission": {"type": "anyone" if not email else "user",
-                                                          "email": email, "role": role},
-                   "danger": "ANYONE-WITH-LINK access" if not email else "",
-                   "current_permissions": existing.get("permissions", [])}, revalidate)
+    return _stage("google_drive_create_folder",
+                  {"name": name, "parent_folder_id": parent_folder_id},
+                  apply, ["nonempty name", "destination verified"],
+                  {"name": name, "parent_folder_id": parent_folder_id}, revalidate)
+
+
+@mcp.tool(title='Share Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
+def google_drive_share(file_id: str, email: str = "", role: str = "reader",
+                       anyone_with_link_acknowledged: bool = False) -> dict:
+    """STAGE sharing. Public link sharing requires an explicit acknowledgement."""
+    import re
+    if role not in {"reader", "writer", "commenter"}:
+        raise ValueError("role must be reader, writer or commenter.")
+    if email and (not re.fullmatch(r"[^@\s]+@[^@\s]+", email)):
+        raise ValueError("email must be an email address without whitespace.")
+    if not email and not anyone_with_link_acknowledged:
+        raise ValueError(
+            "Refusing public-link sharing without anyone_with_link_acknowledged=True.")
+    meta = _drive_file(file_id)
+    _drive_live_file(meta, "canShare")
+    d = _svc("drive", "v3")
+
+    def current_permissions():
+        result = _exec(d.permissions().list(
+            fileId=file_id, supportsAllDrives=True, pageSize=100,
+            fields="nextPageToken,permissions(id,type,role,emailAddress)"), kind="read")
+        if result.get("nextPageToken"):
+            raise RuntimeError("Permission list exceeds one page; refusing to stage sharing.")
+        return result.get("permissions", [])
+
+    existing = current_permissions()
+
+    def apply():
+        body = {"role": role, "type": "user" if email else "anyone"}
+        if email:
+            body["emailAddress"] = email
+        return _exec(d.permissions().create(
+            fileId=file_id, body=body, fields="id,type,role,emailAddress",
+            supportsAllDrives=True), kind="commit", timeout=_WRITE_TIMEOUT)
+
+    def revalidate():
+        _drive_live_file(_drive_file(file_id), "canShare")
+        if current_permissions() != existing:
+            raise RuntimeError("Sharing permissions changed since staging; stage again.")
+
+    return _stage("google_drive_share",
+                  {"file_id": file_id, "email": email, "role": role,
+                   "anyone_with_link_acknowledged": anyone_with_link_acknowledged},
+                  apply, ["file is available", "sharing target explicitly approved"],
+                  {"file_id": file_id, "new_permission": {
+                      "type": "user" if email else "anyone", "email": email, "role": role},
+                   "danger": "PUBLIC LINK ACCESS" if not email else "",
+                   "current_permissions": existing}, revalidate)
 
 
 @mcp.tool(title='Trash Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
 def google_drive_trash(file_id: str) -> dict:
-    """STAGED write: move a Drive file or folder to trash (recoverable). Returns a preview
-    (file being trashed) + operation_id; apply with google_write_commit. Refuses to stage
-    if the file is already trashed, and refuses to commit if it changed since staging."""
-    d = _svc("drive", "v3")
-    meta = d.files().get(fileId=file_id, fields="id,name,mimeType,trashed").execute()
-    if meta.get("trashed"):
-        raise RuntimeError(f"File {file_id} ('{meta.get('name')}') is already in trash.")
+    """STAGE moving a file to trash; refuse if its version changed before commit."""
+    meta = _drive_file(file_id)
+    _drive_live_file(meta, "canTrash")
+    snap = _drive_snapshot(meta)
 
     def apply():
-        updated = _svc("drive", "v3").files().update(
-            fileId=file_id, body={"trashed": True}, fields="id,name,trashed,modifiedTime").execute()
-        return {"trashed": file_id, "name": updated.get("name"),
-                "trashed_time": updated.get("modifiedTime")}
+        changed = _exec(_svc("drive", "v3").files().update(
+            fileId=file_id, body={"trashed": True},
+            fields="id,name,trashed,modifiedTime", supportsAllDrives=True),
+            kind="commit", timeout=_WRITE_TIMEOUT)
+        return {"trashed": file_id, "name": changed.get("name"),
+                "trashed_time": changed.get("modifiedTime")}
 
     def revalidate():
-        cur = d.files().get(fileId=file_id, fields="trashed").execute()
-        if cur.get("trashed"):
-            raise RuntimeError("File was already trashed since staging; refusing.")
+        current = _drive_file(file_id)
+        _drive_live_file(current, "canTrash")
+        if _drive_snapshot(current) != snap:
+            raise RuntimeError("Target file changed since staging; stage again.")
 
     return _stage("google_drive_trash", {"file_id": file_id},
-                  apply, ["file exists and is not trashed"],
-                  {"file_id": file_id, "name": meta.get("name"), "mimeType": meta.get("mimeType")},
-                  revalidate)
+                  apply, ["file is not trashed", "trash capability verified"],
+                  {"file_id": file_id, "name": meta.get("name"),
+                   "mimeType": meta.get("mimeType")}, revalidate)
 
 
 # ---------------------------------------------------------------- Docs
