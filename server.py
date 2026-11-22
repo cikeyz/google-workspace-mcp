@@ -1974,10 +1974,21 @@ def google_drive_permissions(file_id: str) -> dict:
     """Audit who a Drive file is shared with. Returns file_id + permission list
     (id, type, role, emailAddress, displayName, expirationTime)."""
     d = _svc("drive", "v3")
-    perms = d.permissions().list(
-        fileId=file_id,
-        fields="permissions(id,type,role,emailAddress,displayName,expirationTime)").execute()
-    return {"file_id": file_id, "permissions": perms.get("permissions", [])}
+    permissions = []
+    token = ""
+    while True:
+        resp = _exec(d.permissions().list(
+            fileId=file_id, supportsAllDrives=True, pageSize=100,
+            pageToken=token or None,
+            fields="nextPageToken,permissions(id,type,role,emailAddress,displayName,expirationTime)"),
+            kind="read")
+        permissions.extend(resp.get("permissions", []))
+        token = resp.get("nextPageToken") or ""
+        if not token:
+            break
+        if len(permissions) >= 2000:
+            raise RuntimeError("Permission list exceeds safety cap of 2000 items.")
+    return {"file_id": file_id, "permissions": permissions}
 
 
 @mcp.tool(title='List Chat Members', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
@@ -2108,72 +2119,101 @@ def google_calendar_patch(event_id: str, summary: str = "", start: str = "", end
 
 
 @mcp.tool(title='Copy Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
-def google_drive_copy(file_id: str, name: str = "", parent_folder_id: str = "") -> dict:
-    """STAGED write: copy a Drive file (template-copy, organize). Returns a
-    preview + operation_id; apply with google_write_commit."""
-    try:
-        src = _svc("drive", "v3").files().get(
-            fileId=file_id, fields="id,name,mimeType,trashed").execute()
-    except Exception as exc:
-        raise RuntimeError(f"File {file_id} not accessible: {exc}") from exc
-    if src.get("trashed"):
-        raise RuntimeError(f"File {file_id} is trashed.")
+def google_drive_copy(file_id: str, name: str = "", parent_folder_id: str = "",
+                      created_time: str = "", modified_time: str = "") -> dict:
+    """STAGE a copy; validate source, optional destination and timestamp metadata."""
+    src = _drive_file(file_id)
+    _drive_live_file(src, "canCopy")
+    _drive_parent(parent_folder_id)
+    snap = _drive_snapshot(src)
+    timestamps = _drive_timestamp_metadata(created_time, modified_time)
 
     def apply():
-        d = _svc("drive", "v3")
-        body: dict = {}
+        body = dict(timestamps)
         if name:
             body["name"] = name
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
-        return d.files().copy(fileId=file_id, body=body, fields="*").execute()
+        result = _exec(_svc("drive", "v3").files().copy(
+            fileId=file_id, body=body, fields=_DRIVE_FIELDS,
+            supportsAllDrives=True), kind="commit", timeout=_WRITE_TIMEOUT)
+        if timestamps:
+            result["timestamp_verification"] = _drive_timestamp_verification(timestamps, result)
+        return result
 
-    return _stage("google_drive_copy", {"file_id": file_id, "name": name,
-                                        "parent_folder_id": parent_folder_id},
-                  apply, ["source exists and is not trashed"],
+    def revalidate():
+        current = _drive_file(file_id)
+        _drive_live_file(current, "canCopy")
+        if _drive_snapshot(current) != snap:
+            raise RuntimeError("Source file changed since staging; stage the copy again.")
+        _drive_parent(parent_folder_id)
+
+    return _stage("google_drive_copy",
+                  {"file_id": file_id, "name": name, "parent_folder_id": parent_folder_id,
+                   "created_time": created_time, "modified_time": modified_time},
+                  apply, ["source copy permission checked", "destination verified"],
                   {"source": {"id": file_id, "name": src.get("name")},
-                   "new_name": name or "(same)", "parent_folder_id": parent_folder_id}, None)
+                   "new_name": name or "(same)",
+                   "parent_folder_id": parent_folder_id,
+                   "requested_timestamps": timestamps}, revalidate)
 
 
 @mcp.tool(title='Update Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
 def google_drive_update(file_id: str, name: str = "", add_parents: str = "",
-                        remove_parents: str = "") -> dict:
-    """STAGED write: rename and/or move a Drive file (addParents/removeParents
-    are comma-separated folder IDs). Returns a preview + operation_id; apply
-    with google_write_commit. Refuses to commit if the file changed since staging."""
-    try:
-        cur = _svc("drive", "v3").files().get(
-            fileId=file_id, fields="id,name,mimeType,trashed,modifiedTime,parents").execute()
-    except Exception as exc:
-        raise RuntimeError(f"File {file_id} not accessible: {exc}") from exc
-    if not name and not add_parents and not remove_parents:
-        raise RuntimeError("Nothing to change: pass name and/or add_parents/remove_parents.")
-    base_modified = cur.get("modifiedTime")
+                        remove_parents: str = "", modified_time: str = "") -> dict:
+    """STAGE rename, move, or modification timestamp update; revalidate version."""
+    timestamps = _drive_timestamp_metadata(modified_time=modified_time)
+    if not name and not add_parents and not remove_parents and not timestamps:
+        raise ValueError("Nothing to update: supply name, parent change or modified_time.")
+    to_add = [x.strip() for x in add_parents.split(",") if x.strip()]
+    to_remove = [x.strip() for x in remove_parents.split(",") if x.strip()]
+    if len(to_add) > 1:
+        raise ValueError("A Drive file can have only one parent folder.")
+    if len(to_remove) > 1:
+        raise ValueError("A Drive file can be removed from only one parent at a time.")
+    if to_add and to_add == to_remove:
+        raise ValueError("Source and destination parent cannot be the same.")
+    if to_add:
+        _drive_parent(to_add[0])
+    cur = _drive_file(file_id)
+    _drive_live_file(cur, "canEdit")
+    if to_remove and to_remove[0] not in (cur.get("parents") or []):
+        raise ValueError("remove_parents is not a current parent of this file.")
+    snap = _drive_snapshot(cur)
 
     def apply():
-        d = _svc("drive", "v3")
-        body: dict = {}
+        body = dict(timestamps)
         if name:
             body["name"] = name
-        params: dict = {"fileId": file_id, "body": body or None, "fields": "*"}
-        if add_parents:
-            params["addParents"] = add_parents
-        if remove_parents:
-            params["removeParents"] = remove_parents
-        return d.files().update(**{k: v for k, v in params.items() if v is not None}).execute()
+        params = {"fileId": file_id, "body": body, "fields": _DRIVE_FIELDS,
+                  "supportsAllDrives": True}
+        if to_add:
+            params["addParents"] = to_add[0]
+        if to_remove:
+            params["removeParents"] = to_remove[0]
+        result = _exec(_svc("drive", "v3").files().update(**params),
+                       kind="commit", timeout=_WRITE_TIMEOUT)
+        if timestamps:
+            result["timestamp_verification"] = _drive_timestamp_verification(timestamps, result)
+        return result
 
     def revalidate():
-        now = _svc("drive", "v3").files().get(fileId=file_id, fields="id,trashed,modifiedTime").execute()
-        if now.get("trashed") or now.get("modifiedTime") != base_modified:
-            raise RuntimeError("File changed since staging; refusing to overwrite. Re-stage.")
+        latest = _drive_file(file_id)
+        _drive_live_file(latest, "canEdit")
+        if _drive_snapshot(latest) != snap:
+            raise RuntimeError("File metadata changed since staging; stage again.")
+        if to_add:
+            _drive_parent(to_add[0])
 
     return _stage("google_drive_update",
-                  {"file_id": file_id, "name": name,
-                   "add_parents": add_parents, "remove_parents": remove_parents},
-                  apply, ["file exists", "at least one change"],
+                  {"file_id": file_id, "name": name, "add_parents": to_add[0] if to_add else "",
+                   "remove_parents": to_remove[0] if to_remove else "",
+                   "modified_time": modified_time},
+                  apply, ["file editable", "version snapshot recorded", "destination verified"],
                   {"file_id": file_id, "current_name": cur.get("name"),
-                   "requested_name": name or "(unchanged)",
-                   "add_parents": add_parents, "remove_parents": remove_parents}, revalidate)
+                   "requested_name": name or "(unchanged)", "add_parents": to_add,
+                   "remove_parents": to_remove,
+                   "requested_timestamps": timestamps}, revalidate)
 
 
 # ---------------------------------------------------------------- v2.3 additions
@@ -2256,25 +2296,24 @@ def google_gmail_search_threads(query: str = "", label_ids: str = "", max_result
 
 @mcp.tool(title='List Recent Drive Files', annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 def google_drive_recent(max_results: int = 10, order: str = "recency",
-                        page_token: str = "", full: bool = False) -> dict:
-    """List recent Drive files (read-only). order = recency (default), modifiedTime,
-    or modifiedByMeTime. Empty-query shortcut without inventing query syntax.
-    Returns the standard Drive envelope."""
+                        page_token: str = "", full: bool = False,
+                        drive_id: str = "") -> dict:
+    """Recent Drive files; optionally restrict results to one shared drive."""
     if order not in {"recency", "modifiedTime", "modifiedByMeTime"}:
-        raise RuntimeError(f"order must be recency/modifiedTime/modifiedByMeTime (got {order!r}).")
+        raise ValueError("order must be recency, modifiedTime or modifiedByMeTime.")
     order_by = {"recency": "recency desc", "modifiedTime": "modifiedTime desc",
                 "modifiedByMeTime": "modifiedByMeTime desc"}[order]
-    d = _svc("drive", "v3")
-    fields = ("nextPageToken,files(*)" if full else
-              "nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,"
-              "trashed,parents,owners(displayName,emailAddress),webViewLink,"
-              "capabilities(canDownload))")
-    resp = _exec(d.files().list(
-        q="trashed=false", pageSize=min(max_results, 1000), fields=fields,
-        orderBy=order_by, pageToken=_check_page_token(page_token) or None), kind="read")
+    params = {"q": "trashed=false", "pageSize": _drive_page_size(max_results),
+              "fields": "nextPageToken,incompleteSearch,files(*)" if full else _DRIVE_LIST_FIELDS,
+              "orderBy": order_by, "pageToken": _check_page_token(page_token) or None,
+              "supportsAllDrives": True, "includeItemsFromAllDrives": True}
+    if drive_id:
+        params.update(corpora="drive", driveId=drive_id)
+    resp = _exec(_svc("drive", "v3").files().list(**params), kind="read")
     items = resp.get("files", [])
     token = resp.get("nextPageToken") or ""
     return {"items": items, "next_page_token": token, "has_more": bool(token),
+            "incomplete_search": bool(resp.get("incompleteSearch")),
             "result_count": len(items)}
 
 
@@ -2287,7 +2326,10 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
     advanced to page long files. v2.5: stops downloading once the window is filled,
     so body_chars is exact only when text_truncated is false."""
     d = _svc("drive", "v3")
-    meta = _exec(d.files().get(fileId=file_id, fields="id,name,mimeType,size"), kind="read")
+    if not 1 <= max_chars <= 200000 or start_char < 0:
+        raise ValueError("max_chars must be 1..200000 and start_char must be nonnegative.")
+    meta = _drive_file(file_id, "id,name,mimeType,size,trashed")
+    _drive_live_file(meta)
     mime = meta.get("mimeType", "")
     name = meta.get("name", file_id)
     if mime == "application/vnd.google-apps.document":
@@ -2297,7 +2339,7 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
     elif mime == "application/vnd.google-apps.presentation":
         req = d.files().export_media(fileId=file_id, mimeType="text/plain")
     elif mime.startswith("text/") or mime in {"application/json", "application/xml"}:
-        req = d.files().get_media(fileId=file_id)
+        req = d.files().get_media(fileId=file_id, supportsAllDrives=True)
     else:
         raise RuntimeError(
             f"File {file_id} ({mime}) has no text representation; "
@@ -2310,7 +2352,7 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
     stop_at = start + max_chars + 65536
     done = False
     while not done:
-        _, done = downloader.next_chunk()
+        _, done = downloader.next_chunk(num_retries=3)
         if buf.tell() >= stop_at:
             break
     complete = bool(done)
@@ -2330,41 +2372,44 @@ def google_drive_read_content(file_id: str, max_chars: int = 30000, start_char: 
 
 @mcp.tool(title='Create Drive File (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 def google_drive_create_file(name: str, text_content: str = "", mime_type: str = "text/plain",
-                             parent_folder_id: str = "") -> dict:
-    """STAGED write: create a Drive file with inline text content (no local file needed).
-    For local-file uploads use google_drive_upload. Text capped at 5MB.
-    Returns a preview + operation_id; apply with google_write_commit."""
+                             parent_folder_id: str = "", created_time: str = "",
+                             modified_time: str = "") -> dict:
+    """STAGE a UTF-8 file (5MB max), optionally preserving explicit timestamps."""
     if not name.strip():
-        raise RuntimeError("name must be non-empty.")
+        raise ValueError("Drive filename must be non-empty.")
     data = text_content.encode("utf-8")
     if len(data) > 5 * 1024 * 1024:
-        raise RuntimeError(f"text_content is {len(data)} bytes; cap is 5MB (use upload for larger).")
-    if parent_folder_id:
-        try:
-            parent = _svc("drive", "v3").files().get(
-                fileId=parent_folder_id, fields="id,name,mimeType,trashed").execute()
-            if parent.get("trashed"):
-                raise RuntimeError(f"Parent folder {parent_folder_id} is trashed.")
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            raise RuntimeError(f"Parent folder {parent_folder_id} not accessible: {exc}") from exc
+        raise ValueError("Inline file exceeds 5 MB; use google_drive_upload.")
+    timestamps = _drive_timestamp_metadata(created_time, modified_time)
+    _drive_parent(parent_folder_id)
 
     def apply():
         from googleapiclient.http import MediaInMemoryUpload
-        d = _svc("drive", "v3")
-        body: dict = {"name": name, "mimeType": mime_type}
+        body = {"name": name, "mimeType": mime_type, **timestamps}
         if parent_folder_id:
             body["parents"] = [parent_folder_id]
         media = MediaInMemoryUpload(data, mimetype=mime_type, resumable=True)
-        return d.files().create(body=body, media_body=media, fields="*").execute()
+        request = _svc("drive", "v3").files().create(
+            body=body, media_body=media, fields=_DRIVE_FIELDS, supportsAllDrives=True)
+        result = None
+        while result is None:
+            _, result = request.next_chunk(num_retries=3)
+        if timestamps:
+            result["timestamp_verification"] = _drive_timestamp_verification(timestamps, result)
+        return result
+
+    def revalidate():
+        _drive_parent(parent_folder_id)
 
     return _stage("google_drive_create_file",
-                  {"name": name, "mime_type": mime_type, "parent_folder_id": parent_folder_id},
-                  apply, ["name non-empty", "content within 5MB cap"],
+                  {"name": name, "mime_type": mime_type,
+                   "parent_folder_id": parent_folder_id,
+                   "created_time": created_time, "modified_time": modified_time},
+                  apply, ["nonempty name", "within 5MB cap", "destination verified"],
                   {"name": name, "mime_type": mime_type, "content_chars": len(text_content),
                    "content_preview": text_content[:500],
-                   "parent_folder_id": parent_folder_id or "(root)"}, None)
+                   "parent_folder_id": parent_folder_id or "(root)",
+                   "requested_timestamps": timestamps}, revalidate)
 
 
 @mcp.tool(title='Insert Sheet Dimension (staged)', annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True))
