@@ -1,5 +1,8 @@
 name: ci
 
+permissions:
+  contents: read
+
 on:
   push:
   pull_request:
@@ -11,8 +14,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile all Python
@@ -25,3 +30,22 @@ jobs:
         run: >
           ! grep -rEn "GOCSPX-|AIza[0-9A-Za-z_-]{10,}|ya29\.|4/0[A-Za-z0-9_-]{10,}|xox[bap]-" .
           --exclude-dir=.git --exclude-dir=__pycache__ --exclude=ci.yml
+
+
+  drive-unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+      - name: Install pinned MCP dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run offline Drive regression tests
+        run: python -m unittest discover -s setup/tests -p test_drive_unit.py -v

@@ -7,7 +7,7 @@ Run with the server's own venv python from PowerShell (canonical home):
       C:\Users\YOU\.agents\mcps\google-workspace\setup\tests\test_server.py
 
 Coverage:
-1. Tool registration (73 tools, 4 prompts)
+1. Tool registration (90 tools, 4 prompts)
 2. Live READ checks across every service (real known IDs; read-only)
 3. Staged-write E2E per write tool with SELF-CLEANUP:
    calendar create->delete, tasks create->delete, drive folder create->trash,
@@ -99,6 +99,8 @@ EXPECTED = {
     "google_gmail_labels_list", "google_gmail_modify_labels",
     "google_gmail_search_threads",
     "google_drive_recent", "google_drive_read_content", "google_drive_create_file",
+    "google_drive_replace_content", "google_drive_revision_download", "google_drive_label_modify", "google_drive_revision_pin",
+    "google_drive_about", "google_drive_shared_drives", "google_drive_changes_start", "google_drive_changes", "google_drive_revisions", "google_drive_comments", "google_drive_file_labels", "google_drive_restore", "google_drive_shortcut", "google_drive_permission_remove", "google_drive_metadata_update", "google_drive_comment_create", "google_drive_comment_reply",
     "google_sheets_insert_dimension",
     "google_calendar_list_calendars", "google_calendar_search_events",
     "google_calendar_respond", "google_calendar_suggest_time",
@@ -258,7 +260,8 @@ except Exception as e:
 try:
     st = mod.google_drive_create_folder(f"{PREFIX}SHARE-{stamp}")
     folder = commit_ok("share-target folder create committed", st)
-    sh = mod.google_drive_share(folder["id"], email="", role="reader")
+    sh = mod.google_drive_share(folder["id"], email="", role="reader",
+                                 anyone_with_link_acknowledged=True)
     perm = commit_ok("drive_share committed", sh)
     check("drive_share permission verified", perm.get("id") is not None)
     commit_ok("share-target folder trash committed", mod.google_drive_trash(folder["id"]))

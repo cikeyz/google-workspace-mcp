@@ -68,6 +68,8 @@ expected = {
     "google_gmail_labels_list", "google_gmail_modify_labels",
     "google_gmail_search_threads",
     "google_drive_recent", "google_drive_read_content", "google_drive_create_file",
+    "google_drive_replace_content", "google_drive_revision_download", "google_drive_label_modify", "google_drive_revision_pin",
+    "google_drive_about", "google_drive_shared_drives", "google_drive_changes_start", "google_drive_changes", "google_drive_revisions", "google_drive_comments", "google_drive_file_labels", "google_drive_restore", "google_drive_shortcut", "google_drive_permission_remove", "google_drive_metadata_update", "google_drive_comment_create", "google_drive_comment_reply",
     "google_sheets_insert_dimension",
     "google_calendar_list_calendars", "google_calendar_search_events",
     "google_calendar_respond", "google_calendar_suggest_time",

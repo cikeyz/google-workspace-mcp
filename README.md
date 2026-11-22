@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.5.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.6.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -31,6 +31,10 @@
 </p>
 
 > [!NOTE]
+> v2.6 changes the existing `google_drive_share` call: public link sharing now
+> requires `anyone_with_link_acknowledged=True`. Local download filenames are
+> ID-prefixed for collision safety. See [v2.6 migration notes](docs/DRIVE-HARDENING.md).
+>
 > v2.1 changed all list tools from bare arrays to cursor envelopes
 > (`items`, `next_page_token`, `has_more`). See
 > [`docs/MIGRATION-v2.md`](docs/MIGRATION-v2.md). Pin the `v2.0` tag to stay
@@ -57,9 +61,12 @@ guide.
 
 Eleven Google Workspace services behind one server:
 
+Drive v3 security and timestamp uploads: [Drive hardening and Cloud Console checklist](docs/DRIVE-HARDENING.md).
+
 - Gmail search, reads, thread summaries, labels, attachment downloads, staged sends
 - Drive search, metadata, inline text reads, recency, downloads, uploads, creates,
-  folders, sharing audit, copy, move, trash
+  folders, sharing audit, copy, move, trash, restore, shortcuts, comments,
+  shared drives, change tracking, revisions, file labels, permission revocation, binary updates, revision retrieval, label edits
 - Docs reads (all tabs), creates, appends, staged batch updates
 - Sheets metadata, reads, updates, appends, creates, dimension inserts,
   conditional-format reads
@@ -79,7 +86,7 @@ Eleven Google Workspace services behind one server:
 ```mermaid
 flowchart LR
   Client[MCP client] --> Stdio[MCP stdio]
-  Stdio --> Tools[73 Workspace tools + 4 prompts]
+  Stdio --> Tools[90 Workspace tools + 4 prompts]
   Tools --> Stage[Staged-write gate]
   Stage --> Google[Google APIs]
   Tools --> State[(State home)]
@@ -159,12 +166,18 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 | `google_gmail_labels_list`, `google_gmail_modify_labels` (staged) | Labels | `message_id`, `add_label_ids`, `remove_label_ids` |
 | `google_gmail_attachment_download` | Save attachments locally | `message_id`, `attachment_id` |
 | `google_gmail_send` (staged) | Send mail | `to`, `subject`, `body`, `cc`, `bcc` |
-| `google_drive_search`, `google_drive_get`, `google_drive_recent` | Find and describe files | `query`, `max_results`, `page_token`, `full`, `order` |
+| `google_drive_search`, `google_drive_get`, `google_drive_recent` | Find and describe files | `query`, `max_results`, `page_token`, `full`, `order`, `drive_id` |
 | `google_drive_read_content` | Inline text reads (Docs/Slides text, Sheets CSV) | `file_id`, `max_chars`, `start_char` |
-| `google_drive_create_file` (staged), `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path`, `name`, `text_content` |
-| `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id` |
-| `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role` |
+| `google_drive_create_file` (staged), `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path`, `name`, `text_content`, `created_time`, `modified_time` |
+| `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id`, `modified_time` |
+| `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role`, `anyone_with_link_acknowledged` |
 | `google_drive_trash` (staged) | Recoverable delete | `file_id` |
+| `google_drive_about`, `google_drive_shared_drives`, `google_drive_changes_start`, `google_drive_changes` | Account capabilities, shared drives, change polling | `drive_id`, `page_token` |
+| `google_drive_revisions`, `google_drive_file_labels`, `google_drive_comments` | Revisions, labels and comments | `file_id`, `page_token` |
+| `google_drive_restore`, `google_drive_shortcut`, `google_drive_permission_remove` (staged) | Recover, link and revoke access | `file_id`, `target_file_id`, `permission_id`, acknowledgement |
+| `google_drive_metadata_update`, `google_drive_comment_create`, `google_drive_comment_reply` (staged) | File metadata and discussion | `file_id`, `description`, `properties_json`, `content` |
+| `google_drive_replace_content` (staged) | Replace existing binary bytes in place and create a revision | `file_id`, `local_path`, `replace_acknowledged`, `keep_revision_forever` |
+| `google_drive_revision_download`, `google_drive_revision_pin`, `google_drive_label_modify` (staged for pin/labels) | Historical pinned binary revisions and Drive label edits | `file_id`, `revision_id`, `label_id`, `remove_label`, `field_modifications_json` |
 | `google_docs_read`, `google_docs_create`, `google_docs_append` (staged) | Read and write docs | `document_id`, `title`, `text` |
 | `google_docs_update` (staged) | Structural doc edits (insert, delete, replace, style) | `document_id`, `requests`, `destructive_acknowledged` |
 | `google_sheets_metadata`, `google_sheets_read` | Inspect and read sheets | `spreadsheet_id`, `range_`, render options |
