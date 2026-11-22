@@ -57,6 +57,8 @@ guide.
 
 Eleven Google Workspace services behind one server:
 
+Drive v3 security and timestamp uploads: [Drive hardening and Cloud Console checklist](docs/DRIVE-HARDENING.md).
+
 - Gmail search, reads, thread summaries, labels, attachment downloads, staged sends
 - Drive search, metadata, inline text reads, recency, downloads, uploads, creates,
   folders, sharing audit, copy, move, trash
