@@ -44,7 +44,7 @@ class FileSafetyTests(unittest.TestCase):
     def test_download_name_blocks_traversal_and_reserved_names(self):
         self.assertEqual(safe_drive_download_name("..", "abc"), "abc-download")
         self.assertEqual(safe_drive_download_name("CON", "abc"), "abc-download")
-        self.assertEqual(safe_drive_download_name("../secret.txt", "abc"), "abc-.._secret.txt")
+        self.assertEqual(safe_drive_download_name("../secret.txt", "abc"), "abc-_secret.txt")
         self.assertNotIn("/", safe_drive_download_name("a/b", "abc"))
         self.assertNotIn("\\", safe_drive_download_name("a\\b", "abc"))
 
