@@ -333,7 +333,8 @@ def _audit_scrub_args(tool: str, args: dict | None = None) -> dict:
             kept["requests_chars"] = chars
         elif k.endswith("_id") or k.endswith("_ids") or k in (
                 "range_", "range", "role", "status", "space_name",
-                "tasklist_id", "calendar_id", "mimeType"):
+                "tasklist_id", "calendar_id", "mimeType",
+                "created_time", "modified_time"):
             kept[k] = v
         elif k in ("title", "name", "subject", "summary") and isinstance(v, str):
             kept[k] = v[:120]
@@ -354,7 +355,8 @@ def _audit_scrub_result(result) -> dict:
     kept: dict = {}
     for k in ("id", "documentId", "spreadsheetId", "presentationId",
               "name", "title", "status", "trashed", "htmlLink",
-              "spreadsheetUrl", "url"):
+              "spreadsheetUrl", "url", "createdTime", "modifiedTime",
+              "timestamp_verification"):
         if k in result:
             v = result[k]
             kept[k] = v[:200] if isinstance(v, str) else v
