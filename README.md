@@ -6,7 +6,7 @@
 
 <p align="center">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-3776AB.svg?logo=python&logoColor=white">
-  <img alt="Version" src="https://img.shields.io/badge/version-v2.5.0-blue.svg?logo=git&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/version-v2.6.0-blue.svg?logo=git&logoColor=white">
   <a href="https://deepwiki.com/cikeyz/google-workspace-mcp"><img alt="Ask DeepWiki" src="https://deepwiki.com/badge.svg"></a>
 </p>
 
@@ -31,6 +31,10 @@
 </p>
 
 > [!NOTE]
+> v2.6 changes the existing `google_drive_share` call: public link sharing now
+> requires `anyone_with_link_acknowledged=True`. Local download filenames are
+> ID-prefixed for collision safety. See [v2.6 migration notes](docs/DRIVE-HARDENING.md).
+>
 > v2.1 changed all list tools from bare arrays to cursor envelopes
 > (`items`, `next_page_token`, `has_more`). See
 > [`docs/MIGRATION-v2.md`](docs/MIGRATION-v2.md). Pin the `v2.0` tag to stay
@@ -161,11 +165,11 @@ Testing-mode OAuth clients need weekly re-consent unless the app is verified.
 | `google_gmail_labels_list`, `google_gmail_modify_labels` (staged) | Labels | `message_id`, `add_label_ids`, `remove_label_ids` |
 | `google_gmail_attachment_download` | Save attachments locally | `message_id`, `attachment_id` |
 | `google_gmail_send` (staged) | Send mail | `to`, `subject`, `body`, `cc`, `bcc` |
-| `google_drive_search`, `google_drive_get`, `google_drive_recent` | Find and describe files | `query`, `max_results`, `page_token`, `full`, `order` |
+| `google_drive_search`, `google_drive_get`, `google_drive_recent` | Find and describe files | `query`, `max_results`, `page_token`, `full`, `order`, `drive_id` |
 | `google_drive_read_content` | Inline text reads (Docs/Slides text, Sheets CSV) | `file_id`, `max_chars`, `start_char` |
-| `google_drive_create_file` (staged), `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path`, `name`, `text_content` |
-| `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id` |
-| `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role` |
+| `google_drive_create_file` (staged), `google_drive_download`, `google_drive_upload` (staged) | Fetch and store files | `file_id`, `export_mime`, `local_path`, `name`, `text_content`, `created_time`, `modified_time` |
+| `google_drive_create_folder`, `google_drive_copy`, `google_drive_update` (staged) | Organize | `name`, `parent_folder_id`, `modified_time` |
+| `google_drive_share`, `google_drive_permissions` | Share and audit sharing | `file_id`, `email`, `role`, `anyone_with_link_acknowledged` |
 | `google_drive_trash` (staged) | Recoverable delete | `file_id` |
 | `google_docs_read`, `google_docs_create`, `google_docs_append` (staged) | Read and write docs | `document_id`, `title`, `text` |
 | `google_docs_update` (staged) | Structural doc edits (insert, delete, replace, style) | `document_id`, `requests`, `destructive_acknowledged` |
